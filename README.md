@@ -1,8 +1,8 @@
 # DSCH
 
-A compiler for an experimental music composition DSL — parses `.dsch` source and lowers it to MIDI.
+A compiler for a structured music composition DSL — parses `.dsch` source and lowers it to MIDI.
 
-> **Status: Work in progress / research.** Active exploration — architecture and API subject to change.
+> **Status: Work in progress / research.** Active development — architecture and API subject to change.
 
 ## Overview
 
@@ -33,7 +33,7 @@ dsch/
 `.dsch` is an expression-oriented language for algorithmic music composition drawing on two programming paradigms:
 
 - **Concatenative** — at the surface level, meaning arises from juxtaposition. Placing expressions next to each other implicitly threads a musical context from left to right, with no explicit binding operator. `d4 (120 144 60 120) bpm` is three tokens in sequence: a duration that sets context, a list that supplies values, and a suffix keyword that consumes them. This is the same model used by languages like Forth and Joy.
-- **Functional** — internally, AST nodes compose through the `Monad<Exp>::bind` operator in `functional.rs`, and the compiler pipeline is a left-to-right fold of those binds. Concatenative languages often have this property: Joy's formal semantics are defined entirely in terms of function composition. A planned extension will bring Haskell-style syntax to the DSL itself — allowing users to define higher-kinded types, custom data types, and functions directly in `.dsch` files. This would make the language self-extensible: composers could build and share libraries of reusable abstractions (scales, rhythmic patterns, transformations) in the same language they write music in.
+- **Functional** — internally, AST nodes compose through the `Monad<Exp>::bind` operator in `functional.rs`, and the compiler pipeline is a left-to-right fold of those binds. Concatenative languages often have this property: Joy's formal semantics are defined entirely in terms of function composition. A planned extension will bring Haskell-style syntax to the DSL itself — allowing users to define higher-kinded types, custom data types, and functions directly in `.dsch` files. This will make the language self-extensible: composers can build and share libraries of reusable abstractions (scales, rhythmic patterns, transformations) in the same language they write music in.
 
 Programs are nested expressions that specify duration, tempo, pitch, register, dynamics, and rhythm.
 
@@ -179,7 +179,5 @@ The default entry reads `test.dsch` from the working directory.
 
 - [`pest`](https://github.com/pest-parser/pest) — PEG parser generator
 - [`midly`](https://github.com/kovaxis/midly) — MIDI file I/O
-- [`primal`](https://github.com/huonw/primal) — prime-number utilities (used by the ratio/tuplet logic)
-- [`num-integer`](https://github.com/rust-num/num-integer) — gcd / integer utilities
 
 Audio synthesis dependencies (`cpal`, `ndarray`, `ringbuf`, `bit-set`) will be reintroduced in a later phase when DSCH grows custom-instrument support.

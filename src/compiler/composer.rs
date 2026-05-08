@@ -4,8 +4,6 @@ use std::{
     vec::IntoIter,
 };
 
-use primal::Primes;
-
 use crate::compiler::{
     ast::*,
     codegen::{utils::*, *},

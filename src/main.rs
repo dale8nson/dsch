@@ -6,8 +6,6 @@ use crate::compiler::{ast::*, composer::compose_program};
 use crate::pest_parser::{CLParser, Rule, parse_program};
 use pest::{Parser, set_error_detail};
 
-use num_integer::gcd;
-
 use std::{
     iter::IntoIterator,
     ops::{Index, IndexMut},
