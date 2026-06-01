@@ -1,3 +1,4 @@
+#![allow(unused)]
 use pest::{
     iterators::{Pair, Pairs},
     set_error_detail,
@@ -6,7 +7,7 @@ pub use pest_derive::Parser;
 
 use crate::compiler::{ast::*, functional::Monad};
 
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 
 #[derive(Parser)]
 #[grammar = "grammar.pest"]
@@ -33,28 +34,32 @@ fn parse_exps(mut rules: Rules) -> Result<Vec<Exp>> {
 }
 
 fn parse_exp(mut rules: Rules) -> Result<Exp> {
+    // dbg!(&rules);
+    // pause();
     let next = rules.next().unwrap();
     let rule = next.as_rule();
-    // dbg!(&rule);
+    // // dbg!(&rule);
     let inner = next.into_inner();
 
     Ok(match rule {
-        Rule::simple => Exp::Simple(parse_single(inner)?),
-        Rule::compound => Exp::Compound(parse_compound(inner)?),
+        Rule::simple => Exp::Simple(parse_simple(inner)?),
+        Rule::compound => Exp::Compound(Box::new(parse_compound(inner)?)),
         _ => unreachable!(),
     })
 }
 
-fn parse_single(mut rules: Rules) -> Result<Simple> {
+fn parse_simple(mut rules: Rules) -> Result<Simple> {
     let next = rules.next().unwrap();
-    // dbg!(&next);
+    // // dbg!(&next);
     let rule = next.as_rule();
     let inner = next.into_inner();
     match rule {
         Rule::scalar => Ok(Simple::Scalar(parse_scalar(inner)?)),
-        Rule::op => Ok(Simple::Op(parse_op(inner)?)),
-        Rule::ident => Ok(Simple::Ident(Ident(parse_ident(inner)?))),
-        Rule::primitive => Ok(Simple::Primitive(parse_primitive(inner)?)),
+        Rule::prefix => Ok(Simple::Prefix(parse_prefix(inner)?)),
+        Rule::infix => Ok(Simple::Infix(parse_infix(inner)?)),
+        Rule::suffix => Ok(Simple::Suffix(parse_suffix(inner)?)),
+        Rule::ident => Ok(Simple::Ident(parse_ident(inner)?)),
+
         _ => unreachable!(),
     }
 }
@@ -65,10 +70,16 @@ fn parse_scalar(mut rules: Rules) -> Result<Scalar> {
     let inner = next.into_inner();
     match rule {
         Rule::duration => Ok(Scalar::Duration(parse_duration(inner)?)),
+        Rule::dynamic => Ok(Scalar::Dynamic(parse_dynamic(inner)?)),
         Rule::frequency => Ok(Scalar::Frequency(parse_frequency(inner)?)),
+        Rule::tempo => Ok(Scalar::Tempo(parse_absolute(inner)?)),
         Rule::pure => Ok(Scalar::Pure(parse_pure(inner)?)),
         _ => unreachable!(),
     }
+}
+
+fn parse_dynamic(mut rules: Rules) -> Result<String> {
+    Ok(String::from(rules.next().unwrap().as_span().as_str()))
 }
 
 fn parse_duration(mut rules: Rules) -> Result<Duration> {
@@ -77,7 +88,7 @@ fn parse_duration(mut rules: Rules) -> Result<Duration> {
     let inner = next.into_inner();
     match rule {
         Rule::fixed => Ok(Duration::Fixed(parse_fixed(inner)?)),
-        Rule::fractional => Ok(Duration::Fractional(parse_fractional(inner).unwrap())),
+        Rule::fractional => Ok(Duration::Fractional(parse_fractional(inner)?)),
         _ => unreachable!(),
     }
 }
@@ -121,6 +132,8 @@ fn parse_seconds(mut rules: Rules) -> Result<Absolute> {
 }
 
 fn parse_fractional(mut rules: Rules) -> Result<Fractional> {
+    // dbg!(&rules);
+    // pause();
     let next = rules.next().unwrap();
     let rule = next.as_rule();
     let inner = next.into_inner();
@@ -145,25 +158,18 @@ fn parse_frequency(mut rules: Rules) -> Result<Absolute> {
     parse_absolute(inner)
 }
 
-fn parse_op(mut rules: Rules) -> Result<Op> {
+fn parse_infix(mut rules: Rules) -> Result<Infix> {
     let next = rules.next().unwrap();
     let rule = next.as_rule();
     let inner = next.into_inner();
 
     match rule {
-        Rule::colon => Ok(Op::Colon),
-        Rule::intercalate => Ok(Op::Intercalate),
-        Rule::range => Ok(Op::Range),
+        Rule::colon => Ok(Infix::Colon),
+        Rule::intercalate => Ok(Infix::Intercalate),
+        Rule::range => Ok(Infix::Range),
         _ => unreachable!(),
     }
 }
-
-// fn parse_range(mut rules: Rules) -> Result<Range> {
-//     Ok(Range {
-//         start: parse_exp(rules.next().unwrap().as_rule())?,
-//         end: parse_exp(rules.next().unwrap().as_rule())?,
-//     })
-// }
 
 fn parse_pure(mut rules: Rules) -> Result<Pure> {
     let next = rules.next().unwrap();
@@ -203,7 +209,8 @@ fn parse_absolute(mut rules: Rules) -> Result<Absolute> {
     let next = rules.next().unwrap();
 
     let rule = next.as_rule();
-
+    // dbg!(rule);
+    // pause();
     // let inner = next.into_inner();
 
     match rule {
@@ -217,7 +224,7 @@ fn parse_compound(mut rules: Rules) -> Result<Compound> {
     let next = rules.next().unwrap();
 
     let rule = next.as_rule();
-    // dbg!(&rule);
+    // // dbg!(&rule);
     let mut inner = next.into_inner();
     match rule {
         Rule::parens => Ok(Compound::Parens(parse_exps(
@@ -230,8 +237,19 @@ fn parse_compound(mut rules: Rules) -> Result<Compound> {
             inner.next().unwrap().into_inner(),
         )?)),
         Rule::ratio => Ok(Compound::Ratio(parse_ratio(inner)?)),
+        Rule::decl => Ok(Compound::Decl(Box::new(parse_decl(inner)?))),
+
         _ => unreachable!(),
     }
+}
+
+fn parse_decl(mut rules: Rules) -> Result<Decl> {
+    let ident = rules.next().unwrap().into_inner();
+    let exp = rules.next().unwrap().into_inner();
+    Ok(Decl {
+        ident: parse_ident(ident)?,
+        binding: Box::new(parse_exp(exp)?),
+    })
 }
 
 fn parse_ratio(mut rules: Rules) -> Result<Vec<Absolute>> {
@@ -253,26 +271,16 @@ fn parse_float(rule: Pair<'_, Rule>) -> Result<f64> {
     f64::from_str(rule.as_span().as_str()).map_err(|err| err.into())
 }
 
-fn parse_ident(mut rules: Rules) -> Result<String> {
+fn parse_ident(mut rules: Rules) -> Result<Ident> {
     let next = rules.next().unwrap();
-    Ok(String::from(next.as_span().as_str()))
-}
-
-fn parse_primitive(mut rules: Rules) -> Result<Primitive> {
-    let next = rules.next().unwrap();
-    // dbg!(&next);
-    let rule = next.as_rule();
-    let inner = next.into_inner();
-    Ok(match rule {
-        Rule::prefix => Primitive::Prefix(parse_prefix(inner)?),
-        Rule::suffix => Primitive::Suffix(parse_suffix(inner)?),
-        _ => unreachable!(),
-    })
+    Ok(Ident(String::from(next.as_span().as_str())))
 }
 
 fn parse_prefix(mut rules: Rules) -> Result<Prefix> {
     let next = rules.next().unwrap();
     let rule = next.as_rule();
+    // dbg!(&rule);
+    // pause();
     Ok(match rule {
         Rule::dur => Prefix::Dur,
         Rule::pc => Prefix::Pc,
@@ -291,4 +299,8 @@ fn parse_suffix(mut rules: Rules) -> Result<Suffix> {
         Rule::freq => Suffix::Freq,
         _ => unreachable!(),
     })
+}
+
+fn pause() {
+    let _ = std::io::stdin().read_line(&mut String::new());
 }

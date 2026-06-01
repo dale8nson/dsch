@@ -3,3 +3,6 @@ parsed*.txt
 General\ Midi.txt
 ast.txt
 .DS_Store
+*.sf2
+*.mid
+~*

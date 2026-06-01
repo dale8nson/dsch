@@ -6,7 +6,7 @@ A compiler for a structured music composition DSL — parses `.dsch` source and 
 
 ## Overview
 
-`DSCH` reads `.dsch` files in a custom expression-oriented DSL and compiles them to a tree of scoped musical contexts which is then rendered to a Standard MIDI File. It was previously the `compiler` crate inside the `sound-studies` workspace and has been spun out into its own self-contained crate.
+`DSCH` reads `.dsch` files in a custom expression-oriented DSL, compiles them to a tree of scoped musical contexts, schedules those contexts as time-stamped MIDI events, and writes a Standard MIDI File. It was previously the `compiler` crate inside the `sound-studies` workspace and has been spun out into its own self-contained crate.
 
 ## Layout
 
@@ -17,15 +17,15 @@ dsch/
 ├── prototype.dsch              # Reference composition
 ├── test.dsch                   # Minimal smoke-test input
 └── src/
-    ├── main.rs                # Entry point: read .dsch, parse, compose
+    ├── main.rs                # Entry point: CLI → parse → compose → schedule → MIDI
     ├── pest_parser.rs         # Pest PEG parser → AST
     └── compiler/
         ├── mod.rs
         ├── ast.rs             # AST type definitions
         ├── functional.rs      # Monad / Functor / Combinator scaffolding
-        ├── composer.rs        # Tree-walking compiler → scoped contexts
-        ├── codegen.rs         # MIDI-domain primitives (PPQ, Length, Mpb, Velocity, Ctx, …)
-        └── renderer.rs        # Context tree → MIDI tracks (in progress)
+        ├── composer.rs        # Fold over AST → scoped-context arena
+        ├── codegen.rs         # MIDI-domain types (PPQ, Length, Mpb, Velocity, Ctx, Pc, Register, Context, …)
+        └── scheduler.rs       # Context tree → time-stamped MIDI track
 ```
 
 ## The `.dsch` DSL
@@ -46,44 +46,52 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 | `[a, b, c]` | Set — comma-separated unordered collection |
 | `a:b:c` | Ratio — proportional time subdivision |
 
-**Primitives (prefix keywords):**
+**Scalars:**
 
-| Token | Meaning |
-|-------|---------|
+| Form | Meaning |
+|------|---------|
+| `<n>` `<n>.<n>` `+<n>` `-<n>` | Numbers — integer, float, signed (relative) |
 | `d<n>` | Fractional duration (e.g. `d4` = quarter note, `d8` = eighth note) |
 | `d<a>:<b>` | Tuplet duration — `a` notes in the time of `b` |
 | `5'` `2"` `5'2"` | Fixed duration — minutes, seconds, or combined |
-| `pc` | Pitch class |
+| `<n> bpm` | Tempo |
+| `<n>Hz` | Frequency |
+| `ppp` `pp` `p` `mp` `mf` `f` `ff` `fff` | Discrete dynamic level |
+
+**Prefix:**
+
+| Token | Meaning |
+|-------|---------|
+| `pc` | Pitch class — bind the following value(s) as pitch classes |
 | `reg` | Register (octave) |
+| `d` | Distribute a duration across the following compound |
 | `~` | Rest |
 
-**Primitives (suffix keywords):**
+**Suffix:**
 
 | Token | Meaning |
 |-------|---------|
-| `bpm` | Tempo in beats per minute |
-| `A` | Amplitude (velocity) |
-| `Hz` | Frequency suffix (e.g. `440Hz`) |
+| `bpm` | Apply a tempo to the preceding compound |
+| `Hz`  | Apply a frequency to the preceding compound |
+| `A`   | Amplitude (velocity) |
 
-**Dynamics:**
-
-| Token | Meaning |
-|-------|---------|
-| `ppp` `pp` `p` `mp` `mf` `f` `ff` `fff` | Discrete dynamic levels |
-| `<` | Crescendo (continuous increase) |
-| `>` | Decrescendo (continuous decrease) |
-
-**Operators:**
+**Infix:**
 
 | Token | Meaning |
 |-------|---------|
 | `:`   | Ratio separator |
 | `><`  | Intercalate — interleave two sequences |
-| `...` | Range |
+| `..`  | Range — inclusive discrete enumeration between two values |
+| `<`   | Interpolate upward — continuously ramp from the left operand to the right |
+| `>`   | Interpolate downward — continuously ramp from the left operand to the right |
+
+`<` and `>` are general interpolation operators rather than dynamics-specific symbols. The parameter being interpolated is determined by the values they connect and the surrounding context: `mp < f` is a crescendo, `120 < 144 bpm` is an accelerando, `220 < 440 Hz` is a glissando, `pc 0 < 12` is a pitch glide of an octave, and so on. `..` and `<`/`>` together form the language's two-axis taxonomy of change over time — discrete enumeration vs. continuous sweep. The range `..` is inclusive at both ends, matching how composers naturally think about musical ranges ("from C to G" includes G).
+
+`...` is reserved for ellipsis semantics in a future revision of the language — continuation, repetition, or "and so on" — and is intentionally kept distinct from `..`.
 
 **Bindings:**
 
-`ident: exps` declares a named expression. Identifiers are alphanumeric (with underscores) and may carry `'` (prime) suffixes — useful for related variants like `theme`, `theme'`, `theme''`.
+`ident: exp` declares a named expression. Identifiers are alphanumeric (with underscores) and may carry `'` (prime) suffixes — useful for related variants like `theme`, `theme'`, `theme''`. Bindings are stored per-context in the composer's `bindings` arena.
 
 ### Example
 
@@ -123,34 +131,36 @@ This specifies a 5-minute composition, subdivided by nested ratios, with quarter
     ▼
   Program AST
     │
-    │  Composer — monadic fold over AST,
+    │  Composer — left-to-right fold over AST,
     │  producing a tree of scoped contexts:
-    │  duration · pitch class · tempo · register · velocity · program
+    │  duration · pitch class · tempo · register · velocity · program · bindings
     ▼
-  State (Ctx arena: parents · scope_types · lengths · pcs · tempos · bpms · registers · velocities · programs · children)
+  State (Ctx arena: parents · children · scope_types · lengths · pcs · tempos · bpms ·
+                    registers · velocities · programs · bindings · stack · garbage)
     │
-    │  Renderer (in progress)
+    │  Scheduler — walks the context tree, fills a BTreeMap<Ticks, Vec<Instruction>>,
+    │  emits a single MIDI track with delta-time encoding
     ▼
   MIDI (midly::Smf, PPQ = 25200)
 ```
 
 ### Parser
 
-A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walker in `pest_parser.rs` that builds the typed AST defined in `compiler/ast.rs`.
+A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walker in `pest_parser.rs` that builds the typed AST defined in `compiler/ast.rs`. The AST is rooted at `Exp = Compound | Simple | Noop | EOS`, with `Simple = Prefix | Scalar | Infix | Suffix | Ident` mirroring the grammar's fixity-based taxonomy.
 
 ### Composer
 
-The composer in `compiler/composer.rs` is structured as a left-to-right fold over expressions. Each pair of adjacent expressions is reduced through `compose_exps`, which dispatches via `Monad::bind` to specialised composers per AST shape (`compose_simple`, `compose_compound`, `compose_scalar`, `compose_primitive`, `compose_duration`, `compose_fractional`, `compose_prefix`, `compose_suffix`, …).
+The composer in `compiler/composer.rs` is structured as a left-to-right fold over expressions. Adjacent expressions are reduced through `combine`, which dispatches via `Monad::bind` to specialised composers per AST shape (`compose_simple`, `compose_scalar`, `compose_duration`, `compose_fractional`, `compose_prefix`, `compose_suffix`, `compose_infix`, `compose_tempo`, `compose_dynamic`, `compose_decl`, `compose_ratio`, `compose_range`, `compose_pure`, `compose_frequency`, `compose_ident`, …). Helper passes (`drain_stack`, `consume_prefixes`, `consume_compound`, `merge_sequences`) manage the pending-prefix stack and assemble compound expressions before their context is finalised.
 
-State is an arena rather than a recursive structure: `Ctx::Id(usize)` indexes into parallel `Vec`s for `parents`, `scope_types`, `lengths`, `pcs`, `tempos`, `bpms`, `registers`, `velocities`, `programs`, and `children`. Children inherit tempo from their parent at creation time, and scope type (`Sequence` / `Stack` / `Set`) records how each compound's contents will be flattened into MIDI tracks. Fixed durations (`5'2"`) become absolute microsecond lengths; fractional durations (`d4`, `d3:2`) are resolved against the parent's remaining length and current tempo.
+State is an arena rather than a recursive structure: `Ctx::Id(usize)` indexes into parallel `Vec`s for `parents`, `children`, `scope_types`, `lengths` (per-context `Vec<Length>` for sequences), `pcs`, `tempos`, `bpms`, `registers`, `velocities` (also per-context `Vec<Velocity>`), `programs`, and `bindings` (per-context `BTreeMap<Ident, Exp>`). A `stack` of pending `(Exp, Ctx)` pairs holds prefixes waiting for an operand, and a `garbage` list tracks discarded contexts. Children inherit tempo from their parent at creation time, and scope type (`Sequence` / `Stack` / `Set`) records how each compound's contents will be flattened into MIDI events. Fixed durations (`5'2"`) become absolute microsecond lengths; fractional durations (`d4`, `d3:2`) are resolved against the parent's remaining length and current tempo.
 
-### Codegen primitives
+### Codegen types
 
-`compiler/codegen.rs` defines the MIDI-domain types used downstream of the composer: `PPQ` (25200 ticks per quarter — chosen for high divisibility), `MicroSeconds`, `Length`, `Mpb` (microseconds per beat — the internal tempo representation), `Velocity`, `Pc`, `Prog`, and an `Instruction` enum that wraps `midly::MidiMessage` and `MetaMessage`. Helpers convert fractional/fixed durations to microseconds (`to_length`, `duration_to_micros`).
+`compiler/codegen.rs` defines the MIDI-domain types used downstream of the composer: `PPQ` (25200 ticks per quarter — chosen for high divisibility), `MicroSeconds`, `Length`, `Mpb` (microseconds per beat — the internal tempo representation), `Velocity`, `Pc` (`Class(i8) | None`), `Prog`, `Register` (`Reg(i8) | None`), `Context` (a flat per-`Ctx` record of all parallel-vec fields), and an `Instruction` enum with `Midi(MidiMessage)` / `Meta(MetaMessage)` variants. Helpers convert between time domains: `to_length` (fractional → microseconds), `duration_to_micros` (fixed → microseconds), `length_to_ticks` (microseconds → PPQ ticks at a given tempo).
 
-### Renderer
+### Scheduler
 
-`compiler/renderer.rs` consumes the composed `State` and emits a `midly::Smf`. It is the current focus of work — the scaffolding (`Renderer::render`, instruction/event buffers per track) is in place, and the next step is walking the context tree to emit time-stamped `TrackEvent`s.
+`compiler/scheduler.rs` consumes the composed `State` and emits a `midly::Smf`. `schedule_context` walks the context tree depth-first, threading a global `clock` (in PPQ ticks). For each note it inserts a `NoteOn`/`NoteOff` pair (encoded as a zero-velocity `NoteOn`) into a `BTreeMap<Ticks, Vec<Instruction>>` keyed by absolute time. Tempo changes and program changes are dropped into the same map as `MetaMessage::Tempo` and `MidiMessage::ProgramChange`. `render_tracks` then iterates the map in time order, converting absolute ticks into delta-time `TrackEvent`s for a single-track SMF. The pipeline runs end-to-end: `cargo run -- --input <name>` reads `<name>.dsch` and writes `<name>.mid`.
 
 ## Implementation status
 
@@ -160,24 +170,27 @@ State is an arena rather than a recursive structure: `Ctx::Id(usize)` indexes in
 | Composer — fixed/fractional durations, tuplets | Working |
 | Composer — `pc` (absolute & relative), `reg` | Working |
 | Composer — scope types (Sequence, Stack, Set) | Working |
-| Composer — `bpm`, `A`, `Hz`, `dur`, `rest` | Stubbed (`todo!()`) |
-| Composer — operators (`:`, `><`, `...`) | Stubbed |
-| Composer — identifier bindings | Stubbed |
-| Renderer → MIDI | In progress |
-| Dynamics (`ppp` … `fff`, `<`, `>`) | Parsed; not yet composed |
+| Composer — tempo (`<n> bpm`) | Working (scalar form) |
+| Composer — declarations (`ident: exp`) | Initial dispatch in place; semantics partial |
+| Composer — dynamics, frequency, amplitude (`A`), bare suffix forms | Stubbed |
+| Composer — infix (`:`, `><`, `..`, `<`, `>`) | Stubbed |
+| Scheduler → MIDI | Working — emits a single-track SMF with delta-time events |
 
 ## Running
 
 ```bash
-# Parse test.dsch and run it through the composer
-cargo run
+# Read <name>.dsch from the working directory, write <name>.mid alongside it
+cargo run -- --input <name>
 ```
 
-The default entry reads `test.dsch` from the working directory.
+For example, `cargo run -- --input test` parses `test.dsch`, composes it, schedules MIDI events, and writes `test.mid`.
 
 ## Built with
 
 - [`pest`](https://github.com/pest-parser/pest) — PEG parser generator
+- [`pest_derive`](https://github.com/pest-parser/pest) — derive macro for typed Pest grammars
 - [`midly`](https://github.com/kovaxis/midly) — MIDI file I/O
+- [`clap`](https://github.com/clap-rs/clap) — CLI argument parsing (`--input <name>`)
+- [`num-rational`](https://github.com/rust-num/num-rational) — exact rational arithmetic for ratios and tuplets
 
 Audio synthesis dependencies (`cpal`, `ndarray`, `ringbuf`, `bit-set`) will be reintroduced in a later phase when DSCH grows custom-instrument support.
