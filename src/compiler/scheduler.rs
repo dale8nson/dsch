@@ -69,7 +69,7 @@ impl<'a> Scheduler<'a> {
 }
 
 pub fn schedule<'a>(mut state: State) -> Smf<'a> {
-    dbg!(&state);
+    // dbg!(&state);
     let ctx = Ctx::Id(0);
     let mut scheduler = Scheduler::default();
 
@@ -91,7 +91,7 @@ pub fn schedule<'a>(mut state: State) -> Smf<'a> {
     schedule_context(Monad::ret(ctx), &mut state, &mut scheduler);
     // dbg!(&scheduler);
     let tracks = render_tracks(&mut scheduler);
-    dbg!(&tracks);
+    // dbg!(&tracks);
     // pause();
 
     let smf = Smf { header, tracks };
@@ -106,6 +106,7 @@ fn schedule_context<'a>(
     // dbg!(ctx);
 
     ctx.bind(Box::new(|mut ctx_| {
+        print_state(state, ctx_);
         let mut context = state.get_context(ctx_);
         let len = context.pcs.len();
         let scope = state.scope_type(ctx_);
@@ -121,9 +122,7 @@ fn schedule_context<'a>(
                 .zip(context.lengths.into_iter().cycle().take(len))
                 .for_each(|((pc, velocity), length)| {
                     let beats = length.as_u64() as f64 / context.tempo.0 as f64;
-
                     schedule_note(scheduler, vec![pc], context.register, vec![velocity], beats);
-
                     scheduler.forward(length_to_ticks(length, context.tempo));
                 });
         } else {
@@ -138,7 +137,7 @@ fn schedule_context<'a>(
 
             let parent = state.parent(ctx_);
             // print_state(state, parent);
-            print_state(state, ctx_);
+            // print_state(state, ctx_);
             let parent_scope = state.scope_type(parent);
             if matches!(parent_scope, ScopeType::Sequence) {
                 scheduler.forward(length_to_ticks(

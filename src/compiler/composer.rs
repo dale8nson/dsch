@@ -1,11 +1,12 @@
 #![allow(unused, const_item_mutation)]
 use std::{
+    clone,
     collections::{BTreeMap, HashSet},
-    iter::{Iterator, Peekable, zip},
+    iter::{Cloned, Cycle, Iterator, Map, Peekable, Take, Zip, zip},
     ops::{Deref, DerefMut},
     path::PathBuf,
-    slice::Iter,
-    vec::IntoIter,
+    slice::{Iter, IterMut},
+    vec::{Drain, IntoIter},
 };
 
 use crate::compiler::{
@@ -40,8 +41,8 @@ pub struct State {
 impl State {
     pub fn push(&mut self, exp: Exp, ctx: Ctx) {
         eprintln!(
-            "{}",
-            format!("\x1b[0;32mPUSH {ctx:?} {exp}\x1b[0m\n").to_uppercase()
+            "\x1b[0;32m{}\x1b[0m\n",
+            format!("STACK <- {ctx:?} {exp}").to_uppercase()
         );
         self.stack.push((exp, ctx));
     }
@@ -297,6 +298,7 @@ impl State {
     }
 
     fn set_scope_type(&mut self, ctx: Ctx, scope_type: ScopeType) {
+        eprintln!("\x1b[032mSET {ctx:?} TO SCOPE TYPE {scope_type:?}\x1b[0m\n");
         self.scope_types[ctx.to_usize()] = scope_type;
     }
 
@@ -344,6 +346,7 @@ impl State {
     }
 
     pub fn discard(&mut self, ctx: Ctx) {
+        eprintln!("\x1b[0;31mDISCARD {ctx:?}\x1b[0m");
         self.garbage.push(ctx);
     }
 
@@ -389,47 +392,28 @@ fn combine(lhs: Exp, rhs: Exp, state: &mut State, mut ctx: Ctx) -> Monad<Exp> {
     let res = match (lhs, rhs) {
         (lhs @ Exp::Noop, rhs) => match rhs {
             ref rhs @ Exp::Compound(ref compound) => {
-                if state.stack.len() < 2 {
-                    ctx = parent;
-                    state.set_current_context(ctx);
-                }
-
                 let ctx = state.append_child(ctx);
-
                 match **compound {
                     Compound::Parens(_) => state.set_scope_type(ctx, ScopeType::Sequence),
                     Compound::Braces(_) => state.set_scope_type(ctx, ScopeType::Stack),
-                    _ => todo!(),
+                    _ => state.set_scope_type(ctx, ScopeType::None),
                 }
                 Monad::ret(rhs.clone()).bind(Box::new(|rhs| match rhs {
-                    Exp::Compound(compound) => {
-                        consume_prefixes(*compound, state, ctx).bind(Box::new(|rhs: Exp| {
-                            if let Some((lhs, ctx_)) = state.pop() {
-                                combine(lhs, rhs.clone(), state, ctx_).bind(Box::new(|lhs| {
-                                    dbg!();
-                                    state.push(rhs, ctx);
-                                    print_state(state, ctx);
-                                    let parent = state.parent(ctx);
-                                    state.set_current_context(parent);
-                                    Monad::ret(Exp::Noop)
-                                }))
-                            } else {
-                                dbg!();
-                                eprintln!("{rhs} {ctx:?}");
-                                state.push(rhs, ctx);
-                                let parent = state.parent(ctx);
-                                state.set_current_context(parent);
-                                Monad::ret(NOOP)
-                            }
-                        }))
-                    }
                     rhs => combine(rhs, NOOP, state, ctx),
                 }))
             }
             rhs @ Exp::Simple(Simple::Prefix(_)) => Monad::ret(rhs),
             Exp::Noop => {
-                dbg!();
-                Monad::ret(NOOP)
+                // dbg!();
+                if let Some((lhs, ctx)) = state.pop() {
+                    eprintln!("\x1b[0;31m{}\x1b[0m\n", format!("{lhs} {ctx:?}"));
+                    match lhs {
+                        Exp::Compound(compound) => consume_compound(*compound, state, ctx),
+                        _ => todo!(),
+                    }
+                } else {
+                    Monad::ret(NOOP)
+                }
             }
             rhs => {
                 dbg!();
@@ -441,23 +425,53 @@ fn combine(lhs: Exp, rhs: Exp, state: &mut State, mut ctx: Ctx) -> Monad<Exp> {
             }
         },
         (lhs, Exp::Noop) => match lhs {
-            Exp::Compound(ref compound) => {
+            ref lhs @ Exp::Compound(ref compound) => {
                 consume_prefixes(*compound.clone(), state, ctx).bind(Box::new(|rhs: Exp| {
-                    if let Some((lhs, ctx_)) = state.pop() {
-                        dbg!();
-                        eprintln!("{lhs} {ctx_:?}");
-                        combine(lhs.clone(), rhs.clone(), state, ctx_).bind(Box::new(|lhs| {
-                            eprintln!("{rhs} {ctx:?}");
-                            state.push(rhs.clone(), ctx);
-                            state.set_current_context(parent);
-                            combine(NOOP, lhs, state, parent)
-                        }))
-                    } else {
-                        dbg!();
-                        eprintln!("{rhs} {ctx:?}");
-                        state.push(rhs, ctx);
-                        state.set_current_context(parent);
-                        Monad::ret(NOOP)
+                    let parent = state.parent(ctx);
+                    match state.scope_type(parent) {
+                        ScopeType::Stack => {
+                            if matches!(**compound, Compound::Parens(_)) {
+                                state.push(lhs.clone(), ctx);
+                                Monad::ret(NOOP)
+                            } else {
+                                if let Some((lhs, ctx_)) = state.pop() {
+                                    dbg!();
+                                    eprintln!("{lhs} {ctx_:?}");
+                                    combine(lhs.clone(), rhs.clone(), state, ctx_).bind(Box::new(
+                                        |lhs| {
+                                            dbg!();
+                                            combine(NOOP, lhs, state, ctx)
+                                        },
+                                    ))
+                                } else {
+                                    dbg!();
+                                    eprintln!("{rhs} {ctx:?}");
+                                    state.push(rhs, ctx);
+                                    state.set_current_context(parent);
+                                    Monad::ret(NOOP)
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some((lhs, ctx_)) = state.pop() {
+                                dbg!();
+                                eprintln!("{lhs} {ctx_:?}");
+                                combine(lhs.clone(), rhs.clone(), state, ctx_).bind(Box::new(
+                                    |lhs| {
+                                        eprintln!("{rhs} {ctx:?}");
+                                        state.push(rhs.clone(), ctx);
+                                        state.set_current_context(parent);
+                                        combine(NOOP, lhs, state, parent)
+                                    },
+                                ))
+                            } else {
+                                dbg!();
+                                eprintln!("{rhs} {ctx:?}");
+                                state.push(rhs, ctx);
+                                state.set_current_context(parent);
+                                Monad::ret(NOOP)
+                            }
+                        }
                     }
                 }))
             }
@@ -476,17 +490,17 @@ fn combine(lhs: Exp, rhs: Exp, state: &mut State, mut ctx: Ctx) -> Monad<Exp> {
             (Compound::Parens(lhs_exps), Compound::Parens(rhs_exps)) => {
                 let lhs_ctx = ctx;
                 let rhs_ctx = state.current_context();
-                if matches!(state.scope_type(parent), ScopeType::Stack) {
-                    let m = merge_sequences(lhs_exps, rhs_exps, state, lhs_ctx, rhs_ctx);
-                    m
-                } else {
-                    consume_compound(Compound::Parens(lhs_exps), state, ctx).bind(Box::new(|lhs| {
-                        eprintln!("{lhs} {ctx:?}");
+                // if matches!(state.scope_type(parent), ScopeType::Stack) {
+                //     let m = merge_sequences(lhs_exps, rhs_exps, state, lhs_ctx, rhs_ctx);
+                //     m
+                // } else {
+                consume_compound(Compound::Parens(lhs_exps), state, ctx).bind(Box::new(|lhs| {
+                    eprintln!("{lhs} {ctx:?}");
 
-                        state.set_current_context(ctx);
-                        Monad::ret(NOOP)
-                    }))
-                }
+                    state.set_current_context(ctx);
+                    Monad::ret(NOOP)
+                }))
+                // }
             }
             (lhs @ Compound::Braces(_), rhs @ Compound::Braces(_)) => {
                 let parent_scope = state.scope_type(parent);
@@ -607,10 +621,13 @@ fn consume_prefixes(compound: Compound, state: &mut State, ctx: Ctx) -> Monad<Ex
         if let Exp::Simple(Simple::Prefix(prefix)) = pair[0].0 {
             m = m.bind(Box::new(|mut rhs| {
                 eprintln!(
-                    "\x1b[0;33mCONSUME {} <- {} {:?}\x1b[0m\n",
-                    Exp::Simple(Simple::Prefix(prefix)),
-                    rhs,
-                    ctx
+                    "\x1b[0;33m{}\x1b[0m\n",
+                    format!(
+                        "CONSUME {} <- {} {:?}",
+                        Exp::Simple(Simple::Prefix(prefix)),
+                        rhs,
+                        ctx
+                    )
                 );
                 compose_prefix(
                     Monad::ret(prefix),
@@ -632,14 +649,13 @@ fn consume_prefixes(compound: Compound, state: &mut State, ctx: Ctx) -> Monad<Ex
         pair = state.take(2);
     }
 
-    if pair.len() < 2 {
-        dbg!();
-        if pair.len() == 1 {
-            state.push(pair[0].0.clone(), pair[0].1);
-        }
-    }
+    // if pair.len() < 2 {
 
-    print_state(state, ctx);
+    if pair.len() == 1 {
+        dbg!();
+        eprintln!("{}", pair[0].0);
+        state.push(pair[0].0.clone(), pair[0].1);
+    }
 
     m
 }
@@ -670,24 +686,9 @@ fn consume_compound_exps(
         .fold(Monad::ret(NOOP), |m, rhs| {
             m.bind(Box::new(|mut lhs| {
                 dbg!();
-                eprintln!("{lhs} <- {rhs} {ctx:?}\n");
                 match lhs {
-                    Exp::Noop => match rhs {
-                        Exp::Compound(compound) => {
-                            let ctx = state.append_child(ctx);
-                            match *compound {
-                                Compound::Parens(_) => {
-                                    state.set_scope_type(ctx, ScopeType::Sequence)
-                                }
-                                Compound::Braces(_) => state.set_scope_type(ctx, ScopeType::Stack),
-                                _ => todo!(),
-                            }
-                            combine(Exp::Compound(compound), NOOP, state, ctx)
-                        }
-                        rhs => Monad::ret(rhs),
-                    },
                     lhs => {
-                        eprintln!("\x1b[1;33mCONSUME {compound_string}\x1b[0m\n");
+                        eprintln!("{lhs} <- {rhs} {ctx:?}\n");
                         combine(lhs, rhs, state, ctx)
                     }
                 }
@@ -696,22 +697,26 @@ fn consume_compound_exps(
         .bind(Box::new(|_| {
             dbg!();
             if let Some((lhs, ctx)) = state.pop() {
-                eprintln!("{lhs} {ctx:?}");
-                match lhs {
-                    Exp::Compound(compound) => consume_compound(*compound, state, ctx),
-                    lhs => {
-                        dbg!();
-                        eprintln!("{lhs}");
-                        Monad::ret(lhs)
+                let parent = state.parent(ctx);
+                let parent_scope = state.scope_type(parent);
+                let scope = state.scope_type(ctx);
+                eprintln!("{parent_scope:?} {parent:?} -> {scope:?} {ctx:?}");
+                match (parent_scope, scope) {
+                    (ScopeType::Stack, ScopeType::Sequence) => {
+                        state.push(lhs, ctx);
+                        consume_sequences(parent, state)
+                        // Monad::ret(NOOP)
                     }
+                    _ => match lhs {
+                        Exp::Compound(compound) => consume_compound(*compound, state, ctx),
+                        _ => Monad::ret(NOOP),
+                    },
                 }
             } else {
-                dbg!();
-                let parent = state.parent(state.current_context());
-                state.set_current_context(parent);
                 Monad::ret(NOOP)
             }
-        }));
+        }))
+        .bind(Box::new(|_| consume_sequences(ctx, state)));
 
     eprintln!("\x1b[1;31m{compound_string} CONSUMED\x1b[0m\n");
 
@@ -721,63 +726,96 @@ fn consume_compound_exps(
     }))
 }
 
-fn merge_sequences(
-    lhs_exps: Vec<Exp>,
-    rhs_exps: Vec<Exp>,
+fn consume_sequences(parent: Ctx, state: &mut State) -> Monad<Exp> {
+    eprintln!("\x1b[1;35mCONSUME SEQUENCES\x1b[0m\n");
+    let parent_scope = state.scope_type(parent);
+    eprintln!("\x1b[0;35mPARENT: {parent_scope:?} {parent:?}\x1b[0m\n");
+    eprintln!("\x1b[0;35mStack length: {}\x1b[0m\n", state.stack.len());
+
+    if !matches!(parent_scope, ScopeType::Stack) {
+        dbg!();
+        print_state(state, parent);
+        Monad::ret(NOOP)
+    } else {
+        let mut sequences = Vec::<(IntoIter<Exp>, Ctx)>::new();
+        while let Some(((exp @ Exp::Compound(_)), ctx)) = state.stack.pop() {
+            sequences.push((exp_to_exps(exp).into_iter(), ctx));
+        }
+
+        if sequences.is_empty() {
+            return Monad::ret(NOOP);
+        }
+
+        sequences.reverse();
+
+        eprintln!(
+            "\x1b[0;35msequences:\n{}\x1b[0m\n",
+            format!("{sequences:?}")
+                .split_inclusive(|c| matches!(c, ',' | '['))
+                .collect::<Vec<&str>>()
+                .join("\n")
+                .to_string()
+        );
+
+        merge_sequences(parent, state, &mut sequences);
+
+        Monad::ret(NOOP)
+    }
+}
+
+fn merge_sequences<'a>(
+    parent: Ctx,
     state: &mut State,
-    mut lhs_ctx: Ctx,
-    mut rhs_ctx: Ctx,
-) -> Monad<Exp> {
-    eprintln!("\x1b[0;35mMERGE SEQUENCES\x1b[0m\n");
-    // eprintln!("\x1b[0;35m{lhs_exps:#?}");
-    let parent = state.parent(lhs_ctx);
-    let mut lhs_iter = lhs_exps.iter().cloned().step_by(2);
-    let mut rhs_iter = rhs_exps.iter().cloned().cycle().step_by(2);
-    let mut lhs_iter_2 = lhs_exps.iter().cloned().skip(1).step_by(2);
-    let mut rhs_iter_2 = rhs_exps.iter().cloned().skip(1).step_by(2).cycle();
-    state.set_scope_type(parent, ScopeType::Sequence);
-    state.set_scope_type(lhs_ctx, ScopeType::Stack);
-    state.set_scope_type(rhs_ctx, ScopeType::Stack);
+    mut sequences: &mut Vec<(IntoIter<Exp>, Ctx)>,
+) {
+    let len = sequences.len();
 
-    let m = lhs_iter
-        .clone()
-        .zip(rhs_iter.clone())
-        .fold(Monad::ret(NOOP), |m, (lhs_1, lhs_2)| {
-            let ctx = state.append_child(parent);
-            state.set_scope_type(ctx, ScopeType::Stack);
-            let lhs_ctx = state.append_child(lhs_ctx);
-            state.set_scope_type(lhs_ctx, ScopeType::Stack);
-            state.move_child(lhs_ctx, ctx);
-            let rhs_ctx = state.append_child(rhs_ctx);
-            state.set_scope_type(rhs_ctx, ScopeType::Stack);
-            state.move_child(rhs_ctx, ctx);
-            m.bind(Box::new(|_| {
-                if let Some(rhs_1) = lhs_iter_2.next() {
-                    combine(lhs_1, rhs_1, state, lhs_ctx).bind(Box::new(|lhs| {
-                        if let Some(rhs_2) = rhs_iter_2.next() {
-                            combine(lhs_2, rhs_2, state, rhs_ctx).bind(Box::new(|rhs| {
-                                combine(
-                                    Exp::Compound(Box::new(Compound::Braces(vec![lhs]))),
-                                    Exp::Compound(Box::new(Compound::Braces(vec![rhs]))),
-                                    state,
-                                    parent,
-                                )
-                                // eprintln!("\x1b[0;35m{:#?}", v[v.len() - 1]);
+    let iters = sequences.into_iter().fold(
+        Vec::<(&mut IntoIter<Exp>, Ctx)>::new(),
+        |mut iters, (iter_, ctx_)| {
+            iters.push((iter_, ctx_.clone()));
+            let len_ = iters.len();
+            eprintln!("\x1b[0;34mlen_: {len_}  len: {len}\x1b[0m\n");
+            if len_ == len {
+                let mut ctx_ = state.append_child(parent);
+                state.set_scope_type(ctx_, ScopeType::Stack);
 
-                                // Monad::ret(NOOP)
-                            }))
+                'merge: loop {
+                    for (iter, ctx__) in &mut iters {
+                        if let Some(lhs) = (*iter).next() {
+                            if let Some(rhs) = (*iter).next() {
+                                let mut ctx__ = state.append_child(*ctx__);
+                                state.set_scope_type(ctx__, ScopeType::Stack);
+                                state.move_child(ctx__, ctx_);
+                                combine(lhs, rhs, state, ctx__);
+                            }
                         } else {
-                            Monad::ret(NOOP)
+                            state.discard(ctx_);
+                            break 'merge;
                         }
-                    }))
-                } else {
-                    Monad::ret(NOOP)
+                    }
+                    ctx_ = state.append_child(parent);
+                    state.set_scope_type(ctx_, ScopeType::Stack);
                 }
-            }))
-        });
-    state.discard(lhs_ctx);
-    state.discard(rhs_ctx);
-    m
+            }
+
+            iters
+        },
+    );
+
+    iters.into_iter().for_each(|(_, ctx)| state.discard(ctx));
+    state.set_scope_type(parent, ScopeType::Sequence);
+}
+
+fn exp_to_exps(seq: Exp) -> Vec<Exp> {
+    let mut seq = match seq {
+        Exp::Compound(compound) => match *compound {
+            Compound::Parens(seq) => seq,
+            _ => todo!(),
+        },
+        _ => todo!(),
+    };
+    seq
 }
 
 pub fn print_state(state: &mut State, ctx: Ctx) {
@@ -1013,7 +1051,7 @@ fn compose_prefix(
     state: &mut State,
     mut ctx: Ctx,
 ) -> Monad<Exp> {
-    eprintln!("COMPOSE PREFIX\n");
+    // eprintln!("COMPOSE PREFIX\n");
 
     prefix.bind(Box::new(|prefix| match prefix {
         pc @ Prefix::Pc => rhs.bind(Box::new(|rhs| match rhs {

@@ -84,6 +84,7 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 | `..`  | Range — inclusive discrete enumeration between two values |
 | `<`   | Interpolate upward — continuously ramp from the left operand to the right |
 | `>`   | Interpolate downward — continuously ramp from the left operand to the right |
+| `+` `-` `*` `/` | Arithmetic on numeric operands |
 
 `<` and `>` are general interpolation operators rather than dynamics-specific symbols. The parameter being interpolated is determined by the values they connect and the surrounding context: `mp < f` is a crescendo, `120 < 144 bpm` is an accelerando, `220 < 440 Hz` is a glissando, `pc 0 < 12` is a pitch glide of an octave, and so on. `..` and `<`/`>` together form the language's two-axis taxonomy of change over time — discrete enumeration vs. continuous sweep. The range `..` is inclusive at both ends, matching how composers naturally think about musical ranges ("from C to G" includes G).
 
@@ -173,7 +174,7 @@ State is an arena rather than a recursive structure: `Ctx::Id(usize)` indexes in
 | Composer — tempo (`<n> bpm`) | Working (scalar form) |
 | Composer — declarations (`ident: exp`) | Initial dispatch in place; semantics partial |
 | Composer — dynamics, frequency, amplitude (`A`), bare suffix forms | Stubbed |
-| Composer — infix (`:`, `><`, `..`, `<`, `>`) | Stubbed |
+| Composer — infix (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | Stubbed |
 | Scheduler → MIDI | Working — emits a single-track SMF with delta-time events |
 
 ## Running
