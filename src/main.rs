@@ -1,5 +1,5 @@
 #![allow(unused)]
-mod compiler;
+pub mod compiler;
 mod pest_parser;
 
 use crate::compiler::{ast::*, composer::compose_program, scheduler::schedule};

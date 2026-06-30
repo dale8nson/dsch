@@ -2,11 +2,12 @@
 use std::{
     default,
     fmt::Display,
+    hash::{BuildHasher, DefaultHasher},
     ops::{Add, Div, Mul, Rem, Sub},
     str::FromStr,
 };
 
-use crate::compiler::functional::*;
+use crate::compiler::{codegen, functional::*};
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -20,6 +21,22 @@ pub enum Exp {
     #[default]
     Noop,
     EOS,
+}
+
+impl Exp {
+    pub fn to_string(&self) -> String {
+        let s = format!("{self}").rsplit_once("::").unwrap().1.to_string();
+        s.clone()
+            .chars()
+            .map(|c| {
+                if !s.contains('(') && matches!(c, ')') {
+                    '\0'
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+    }
 }
 
 impl Display for Exp {
@@ -67,6 +84,10 @@ impl Display for Exp {
                                     Interpolation::Increase => "Interpolation::Increase)",
                                     Interpolation::Decrease => "Interpolation::Decrease)",
                                 },
+                                Infix::Plus => "Infix::Plus)",
+                                Infix::Minus => "Infix::Minus)",
+                                Infix::Mul => "Infix::Mul)",
+                                Infix::Div => "Infix::Div)",
                             },
                     Simple::Scalar(scalar) => match scalar.clone() {
                         Scalar::Duration(duration) => match duration {
@@ -102,7 +123,20 @@ impl Display for Exp {
     }
 }
 
-pub const NOOP: Exp = Exp::Noop;
+// impl Display for Vec<Exp> {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         write!(
+//             f,
+//             "{}",
+//             self.iter()
+//                 .map(|exp| format!("{exp}"))
+//                 .collect::<Vec<String>>()
+//                 .join("\n")
+//         )
+//     }
+// }
+
+pub const NOOP: (Exp, codegen::Ctx) = (Exp::Noop, codegen::Ctx::None);
 
 #[derive(Debug, Clone, Default, Copy)]
 pub struct Bpm(pub Absolute);
@@ -131,6 +165,17 @@ pub enum Compound {
     Decl(Box<Decl>),
 }
 
+impl Compound {
+    pub fn to_vec(&self) -> Vec<Exp> {
+        match self {
+            Compound::Parens(exps) | Compound::Braces(exps) | Compound::Brackets(exps) => {
+                exps.clone()
+            }
+            _ => Vec::<Exp>::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Scalar {
     Duration(Duration),
@@ -149,6 +194,10 @@ pub enum Infix {
     Intercalate,
     Range,
     Interpolation(Interpolation),
+    Plus,
+    Minus,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Clone)]
@@ -157,8 +206,16 @@ pub struct Range {
     pub end: Exp,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ident(pub String);
+
+impl BuildHasher for Ident {
+    type Hasher = DefaultHasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        let s = std::hash::RandomState::new();
+        s.build_hasher()
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Interpolation {
@@ -247,6 +304,13 @@ impl Absolute {
         match self {
             Self::UInt(int) => *int as f64,
             Self::Float(float) => *float,
+        }
+    }
+
+    pub fn as_usize(&self) -> usize {
+        match self {
+            Self::UInt(int) => *int as usize,
+            Self::Float(float) => f64::round(*float) as usize,
         }
     }
 }

@@ -1,11 +1,22 @@
 #![allow(unused)]
-use std::collections::{BTreeMap, HashSet};
+#![forbid(clippy::infinite_loop)]
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fmt::Display,
+    io::{stderr, stdout},
+    iter::repeat_n,
+    ops::Div,
+};
 
 use crate::compiler::{
     ast::NOOP,
-    codegen::{utils::length_to_ticks, *},
+    codegen::{
+        utils::{TextStyle::*, gcd, length_to_ticks, out, progress},
+        *,
+    },
     composer::{State, print_state},
     functional::*,
+    scheduler,
 };
 
 pub use midly::{
@@ -45,6 +56,18 @@ impl<'a> Scheduler<'a> {
         self.clock -= ticks;
     }
 
+    fn to(&mut self, ticks: u64) {
+        self.clock = ticks;
+    }
+
+    fn ticks(&self) -> u64 {
+        self.clock
+    }
+
+    fn reset(&mut self) {
+        self.clock = 0;
+    }
+
     fn add_instruction(&mut self, time: u64, instruction: Instruction<'a>) {
         let instructions = self.schedule_mut().get_mut(&time);
         if instructions.is_some() {
@@ -70,7 +93,7 @@ impl<'a> Scheduler<'a> {
 
 pub fn schedule<'a>(mut state: State) -> Smf<'a> {
     // dbg!(&state);
-    let ctx = Ctx::Id(0);
+    let ctx = Ctx::Root;
     let mut scheduler = Scheduler::default();
 
     let header = Header::new(Format::SingleTrack, Timing::Metrical(PPQ));
@@ -88,7 +111,7 @@ pub fn schedule<'a>(mut state: State) -> Smf<'a> {
             f64::round(60_000_000 as f64 / 120 as f64) as u32,
         ))),
     );
-    schedule_context(Monad::ret(ctx), &mut state, &mut scheduler);
+    schedule_context(ctx, &mut state, &mut scheduler);
     // dbg!(&scheduler);
     let tracks = render_tracks(&mut scheduler);
     // dbg!(&tracks);
@@ -98,112 +121,274 @@ pub fn schedule<'a>(mut state: State) -> Smf<'a> {
     smf.to_static()
 }
 
-fn schedule_context<'a>(
-    mut ctx: Monad<Ctx>,
-    state: &mut State,
-    scheduler: &mut Scheduler<'a>,
-) -> Monad<Ctx> {
-    // dbg!(ctx);
+fn schedule_context<'a>(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'a>) -> Length {
+    // dbg!();
+    // print_state(state, ctx);
+    let children = &mut state.children(ctx);
+    let has_children = children.len() > 0;
 
-    ctx.bind(Box::new(|mut ctx_| {
-        print_state(state, ctx_);
-        let mut context = state.get_context(ctx_);
-        let len = context.pcs.len();
-        let scope = state.scope_type(ctx_);
-        context.children.iter().cloned().for_each(|child| {
-            schedule_context(Monad::ret(child), state, scheduler);
-        });
+    match state.scope_type(ctx) {
+        ScopeType::None => state
+            .children(ctx)
+            .iter()
+            .cloned()
+            .fold(Length::default(), |mut length, ctx| {
+                length + schedule_context(ctx, state, scheduler)
+            }),
+        ScopeType::Sequence => {
+            // let ticks = get_ticks(ctx, state);
+            // let playhead = ticks_to_length(scheduler.ticks(), state.tempo(ctx));
 
-        if matches!(scope, ScopeType::Sequence) {
-            context
-                .pcs
-                .into_iter()
-                .zip(context.velocities.into_iter().cycle().take(len))
-                .zip(context.lengths.into_iter().cycle().take(len))
-                .for_each(|((pc, velocity), length)| {
-                    let beats = length.as_u64() as f64 / context.tempo.0 as f64;
-                    schedule_note(scheduler, vec![pc], context.register, vec![velocity], beats);
-                    scheduler.forward(length_to_ticks(length, context.tempo));
-                });
-        } else {
-            let beats = (&context).lengths[0].as_u64() as f64 / (&context).tempo.0 as f64;
-            schedule_note(
-                scheduler,
-                context.pcs.clone(),
-                context.register,
-                context.velocities,
-                beats,
-            );
-
-            let parent = state.parent(ctx_);
-            // print_state(state, parent);
-            // print_state(state, ctx_);
-            let parent_scope = state.scope_type(parent);
-            if matches!(parent_scope, ScopeType::Sequence) {
-                scheduler.forward(length_to_ticks(
-                    *context.lengths.iter().max().unwrap(),
-                    context.tempo,
-                ));
-            }
-        }
-
-        Monad::ret(ctx_)
-    }))
-}
-
-fn get_leaf<'a>(ctx: Monad<Ctx>, state: &mut State, scheduler: &mut Scheduler) -> Monad<Ctx> {
-    ctx.bind(Box::new(|mut ctx_| {
-        if is_leaf(ctx_, state) {
-            if !scheduler.visited.contains(&ctx_) {
-                scheduler.visited.insert(ctx_);
-                return Monad::ret(ctx_);
-            } else {
-                ctx_ = state.parent(ctx_);
-
-                return get_leaf(Monad::ret(ctx_), state, scheduler);
-            }
-        } else {
-            let mut unvisited_children: Vec<Ctx> = state
-                .children(ctx_)
-                .iter()
-                .cloned()
-                .filter(|ctx| !scheduler.visited.contains(&ctx))
-                .collect();
-
-            // dbg!(&unvisited_children);
-            while unvisited_children.len() == 0 {
-                scheduler.visited.insert(ctx_);
-                if scheduler.visited.contains(&Ctx::Id(0)) {
-                    return Monad::ret(Ctx::None);
-                }
-                ctx_ = state.parent(ctx_);
-                unvisited_children = state
-                    .children(ctx_)
+            if has_children {
+                children
                     .iter()
                     .cloned()
-                    .filter(|ctx| !scheduler.visited.contains(&ctx))
-                    .collect();
+                    .fold(Length::default_max(), |mut length, ctx| {
+                        // print_state(state, ctx);
+                        let length_ = schedule_context(ctx, state, scheduler);
+                        scheduler.forward(length_to_ticks(length_.min(length), state.tempo(ctx)));
+                        dbg!(&length_);
+                        length.min(length_)
+                    })
+            } else {
+                state
+                    .pcs(ctx)
+                    .iter()
+                    .cloned()
+                    .zip(state.lengths(ctx).iter().cloned())
+                    .zip(state.velocities(ctx).iter().cloned())
+                    .fold(
+                        Length::default_max(),
+                        |mut length_, ((pc, length), velocity)| {
+                            schedule_note(
+                                scheduler,
+                                vec![pc],
+                                state.register(ctx),
+                                vec![velocity],
+                                vec![length_to_beats(length, state.tempo(ctx))],
+                            );
+                            scheduler
+                                .forward(length_to_ticks(length_.min(length), state.tempo(ctx)));
+                            length_.min(length)
+                        },
+                    )
             }
-
-            ctx_ = unvisited_children[0];
-
-            get_leaf(Monad::ret(ctx_), state, scheduler)
         }
-    }))
+        ScopeType::Stack => {
+            if has_children {
+                children
+                    .iter()
+                    .cloned()
+                    .fold(Length::default_max(), |length, ctx| {
+                        // print_state(state, ctx);
+                        length.min(schedule_context(ctx, state, scheduler))
+                    })
+            } else {
+                print_state(state, ctx);
+                let lengths = state.lengths(ctx);
+                let beats: Vec<f64> = lengths
+                    .iter()
+                    .cloned()
+                    .map(|length| length_to_beats(length, state.tempo(ctx)))
+                    .collect();
+                schedule_note(
+                    scheduler,
+                    state.pcs(ctx),
+                    state.register(ctx),
+                    state.velocities(ctx),
+                    beats,
+                );
+                // ticks_to_length(get_ticks(ctx, state), state.tempo(ctx))
+                lengths.iter().cloned().min().unwrap()
+            }
+        }
+        _ => todo!(),
+    }
+
+    // let scope = state.scope_type(ctx);
+    // let children = &mut state.children(ctx);
+    // let has_children = children.len() > 0;
+
+    // let ticks = if has_children {
+    //     let mut child_iter = children.iter().cloned();
+    //     let init = get_ticks(child_iter.next().unwrap(), state);
+    //     children
+    //         .iter()
+    //         .cloned()
+    //         .fold(init, |a, b| gcd(a, get_ticks(b, state)))
+    // } else {
+    //     get_ticks(ctx, state)
+    // };
+
+    // dbg!(ticks);
+
+    // match scope {
+    //     ScopeType::None => children.iter().for_each(|ctx_| {
+    //         // print_state(state, *ctx_);
+    //         schedule_context(*ctx_, state, scheduler);
+    //     }),
+    //     ScopeType::Sequence => {
+    //         let tempo = state.tempo(ctx);
+    //         let beats: Vec<f64> = state
+    //             .lengths(ctx)
+    //             .iter()
+    //             .map(|length| length.as_f64() / tempo.0 as f64)
+    //             .collect();
+    //         let register = state.register(ctx);
+
+    //         // dbg!();
+    //         if has_children {
+    //             let mut children = get_counters(
+    //                 state,
+    //                 children,
+    //                 ticks_to_length(scheduler.ticks(), state.tempo(ctx)),
+    //             );
+    //             // eprintln!("{IntensePurple}COUNTERS: {:?} {ResetColor}", &children);
+
+    //             let end = ticks_to_length(scheduler.ticks(), tempo)
+    //                 + state.lengths(ctx).iter().cloned().sum();
+
+    //             let mut lengths = state.lengths(ctx).into_iter();
+    //             let mut playhead = ticks_to_length(scheduler.ticks(), tempo);
+    //             // children
+    //             //     .iter()
+    //             //     .for_each(|(ctx, _)| schedule_context(*ctx, state, scheduler));
+    //             while playhead < end {
+    //                 out(
+    //                     0,
+    //                     35,
+    //                     format!(
+    //                         "{IntensePurple}PLAYHEAD: {} END: {}{ResetColor}",
+    //                         playhead.as_u64(),
+    //                         end.as_u64()
+    //                     ),
+    //                 );
+    //                 progress(playhead.as_u32(), end.as_u32(), 36);
+
+    //                 // dbg!(&playhead, &end);
+    //                 children.iter_mut().for_each(|(ctx, counters)| {
+    //                     let lengths = state.lengths(*ctx);
+    //                     counters.iter_mut().zip(lengths.into_iter()).for_each(
+    //                         |(counter, length)| {
+    //                             // eprintln!(
+    //                             //     "{IntensePurple}COUNTER: {}{ResetColor}",
+    //                             //     counter.as_u64()
+    //                             // );
+    //                             if *counter == playhead {
+    //                                 schedule_context(*ctx, state, scheduler);
+    //                                 // *counter += length;
+
+    //                                 // scheduler.forward(length_to_ticks(length, state.tempo(*ctx)));
+    //                                 // playhead += length;
+    //                                 // eprintln!(
+    //                                 //     "{IntensePurple}PLAYHEAD: {}\nTICKS: {}{ResetColor}",
+    //                                 //     playhead.as_u64(),
+    //                                 //     scheduler.ticks()
+    //                                 // );
+    //                             }
+    //                         },
+    //                     );
+    //                 });
+    //                 scheduler.forward(ticks);
+    //                 playhead += ticks_to_length(ticks, state.tempo(ctx));
+    //             }
+    //         } else {
+    //             state
+    //                 .pcs(ctx)
+    //                 .iter()
+    //                 .zip(beats.iter())
+    //                 .zip(state.velocities(ctx).iter())
+    //                 .zip(state.lengths(ctx).iter())
+    //                 .for_each(|(((pc, beat), velocity), length)| {
+    //                     // eprintln!("{IntensePurple}TIME: {}{ResetColor}", scheduler.ticks());
+    //                     // schedule_note(scheduler, vec![*pc], register, vec![*velocity], vec![*beat]);
+    //                     // dbg!();
+
+    //                     scheduler.forward(length_to_ticks(*length, state.tempo(ctx)));
+    //                     // scheduler.forward(ticks);
+
+    //                     // playhead = ticks_to_length(scheduler.ticks(), state.tempo(ctx));
+    //                 });
+    //             // print_state(state, ctx);
+    //         }
+    //     }
+    //     ScopeType::Stack => {
+    //         // dbg!();
+
+    //         // dbg!(has_children);
+    //         if has_children {
+    //             let mut children = get_counters(
+    //                 state,
+    //                 children,
+    //                 ticks_to_length(scheduler.ticks(), state.tempo(ctx)),
+    //             );
+    //             // eprintln!(
+    //             //     "{IntensePurple}TIME (TICKS): {}{ResetColor}",
+    //             //     scheduler.ticks()
+    //             // );
+    //             children.iter_mut().for_each(|(ctx, counters)| {
+    //                 // eprintln!("{IntensePurple}COUNTERS: {counters:?}{ResetColor}");
+    //                 // schedule_context(*ctx, state, scheduler);
+    //                 let lengths = state.lengths(*ctx);
+    //                 counters
+    //                     .iter_mut()
+    //                     .zip(lengths.iter().cloned())
+    //                     .for_each(|(counter, length)| *counter += length);
+    //                 // eprintln!("{IntensePurple}COUNTERS: {counters:?}{ResetColor}");
+    //             });
+    //         } else {
+    //             let tempo = state.tempo(ctx);
+    //             let beats: Vec<f64> = state
+    //                 .lengths(ctx)
+    //                 .iter()
+    //                 .map(|length| length.as_f64() / state.tempo(ctx).0 as f64)
+    //                 .collect();
+    //             schedule_note(
+    //                 scheduler,
+    //                 state.pcs(ctx),
+    //                 state.register(ctx),
+    //                 state.velocities(ctx),
+    //                 beats,
+    //             );
+    //             // print_state(state, ctx);
+    //         }
+    //     }
+    //     _ => todo!(),
+    // }
 }
 
-fn unvisited_children(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'_>) -> Vec<Ctx> {
-    let children: Vec<Ctx> = state
-        .children(ctx)
-        .iter()
-        .cloned()
-        .filter(|ctx| !scheduler.visited.contains(&ctx))
+fn length_to_beats(length: Length, tempo: Mpb) -> f64 {
+    length.as_f64() / tempo.0 as f64
+}
+
+fn ticks_to_length(ticks: u64, tempo: Mpb) -> Length {
+    Length::MicroSeconds((ticks as f64 / PPQ.as_int() as f64 * tempo.0 as f64) as u64)
+}
+
+fn get_counters(
+    state: &mut State,
+    children: &mut Vec<Ctx>,
+    mut offset: Length,
+) -> Vec<(Ctx, Vec<Length>)> {
+    let mut children: Vec<(Ctx, Vec<Length>)> = children
+        .into_iter()
+        .map(|ctx| {
+            let len = state.lengths(*ctx).len();
+            let t = (ctx.clone(), repeat_n(offset, len).collect::<Vec<Length>>());
+            offset += ticks_to_length(get_ticks(*ctx, state), state.tempo(*ctx));
+            t
+        })
         .collect();
+    // eprintln!("{IntenseGreen}CHILDREN: {children:?}{ResetColor}");
     children
 }
 
-fn is_leaf(ctx: Ctx, state: &mut State) -> bool {
-    state.children(ctx).len() == 0
+fn get_ticks(ctx: Ctx, state: &mut State) -> u64 {
+    let lengths = state.lengths(ctx);
+    // dbg!(ctx, &lengths);
+    let mut lengths_iter = lengths.iter().cloned();
+    let init = lengths_iter.next().unwrap();
+    length_to_ticks(lengths_iter.fold(init, |a, b| gcd(a, b)), state.tempo(ctx))
 }
 
 fn schedule_note(
@@ -211,21 +396,25 @@ fn schedule_note(
     pcs: Vec<Pc>,
     register: Register,
     velocities: Vec<Velocity>,
-    beats: f64,
+    beats: Vec<f64>,
 ) {
     let register = if let Register::Reg(register) = register {
         register
     } else {
         4 as i8
     };
-    for (pc, velocity) in pcs.into_iter().zip(velocities.into_iter().cycle()) {
+    for ((pc, beat), velocity) in pcs
+        .into_iter()
+        .zip(beats.into_iter())
+        .zip(velocities.into_iter().cycle())
+    {
         if !matches!(pc, Pc::None) {
             let key = u7::new(((register + 1) * 12 + pc.to_i8()) as u8);
             let vel = u7::new(velocity.0);
             let time = scheduler.clock;
             scheduler.add_instruction(time, Instruction::Midi(MidiMessage::NoteOn { key, vel }));
-
-            let stop = time + f64::round(beats * PPQ.as_int() as f64) as u64;
+            // dbg!(beats);
+            let stop = time + f64::round(beat * PPQ.as_int() as f64) as u64;
 
             // dbg!(&stop);
 

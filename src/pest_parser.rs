@@ -167,6 +167,10 @@ fn parse_infix(mut rules: Rules) -> Result<Infix> {
         Rule::colon => Ok(Infix::Colon),
         Rule::intercalate => Ok(Infix::Intercalate),
         Rule::range => Ok(Infix::Range),
+        Rule::plus => Ok(Infix::Plus),
+        Rule::minus => Ok(Infix::Minus),
+        Rule::mul => Ok(Infix::Mul),
+        Rule::div => Ok(Infix::Div),
         _ => unreachable!(),
     }
 }
