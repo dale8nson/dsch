@@ -4,7 +4,7 @@ use std::{
     fmt::Debug,
     hash::{BuildHasher, DefaultHasher},
     iter::Sum,
-    ops::{Add, AddAssign, Div, Mul, Rem},
+    ops::{Add, AddAssign, Div, Mul, Rem, Sub, SubAssign},
     u64, usize,
 };
 
@@ -128,9 +128,22 @@ impl Mul for Length {
     }
 }
 
+impl Sub for Length {
+    type Output = Length;
+    fn sub(self, rhs: Self) -> Self::Output {
+        Length::MicroSeconds(self.as_u64() - rhs.as_u64())
+    }
+}
+
 impl AddAssign for Length {
     fn add_assign(&mut self, rhs: Self) {
         *self = self.clone() + rhs
+    }
+}
+
+impl SubAssign for Length {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = self.clone() - rhs
     }
 }
 

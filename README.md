@@ -52,9 +52,14 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 | Form | Meaning |
 |------|---------|
 | `<n>` `<n>.<n>` `+<n>` `-<n>` | Numbers — integer, float, signed (relative) |
+| `d<n>` | Fractional duration (no space) — e.g. `d4` = quarter note, `d8` = eighth note |
+| `d<a>:<b>` | Tuplet duration — `a` notes in the time of `b` |
+| `5'` `2"` `5'2"` | Fixed duration — minutes, seconds, or combined |
 | `<n> bpm` | Tempo |
 | `<n>Hz` | Frequency |
 | `ppp` `pp` `p` `mp` `mf` `f` `ff` `fff` | Discrete dynamic level |
+
+> **Note:** `d<n>` duration forms are atomic in the grammar — no whitespace is allowed between `d` and the number. `d4` parses as a duration scalar; `d 4` would parse `d` as an identifier. A planned refactor will move duration to a proper prefix so spacing is irrelevant, but this requires additional composer work.
 
 **Prefix:**
 
@@ -62,11 +67,8 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 |-------|---------|
 | `pc` | Pitch class — bind the following value(s) as pitch classes |
 | `reg` | Register (octave) |
-| `d <n>` | Fractional duration — e.g. `d 4` = quarter note, `d 8` = eighth note |
-| `d <a>:<b>` | Tuplet duration — `a` notes in the time of `b` |
+| `d` | Duration prefix (planned — not yet dispatched in the composer) |
 | `~` | Rest |
-
-> **Note on fixed durations:** The `5'`, `2"`, `5'2"` (minutes/seconds) notation is defined in the grammar but is currently under revision — it is not yet dispatched through the prefix pipeline. Use fractional durations (`d <n>`) for now.
 
 **Suffix:**
 
@@ -190,12 +192,13 @@ For leaf contexts, `schedule_note` inserts a `NoteOn`/`NoteOff` pair (zero-veloc
 |-------|--------|
 | Parser (grammar + AST) | Complete |
 | Grammar — arithmetic infix (`+`, `-`, `*`, `/`) | In grammar; composer dispatch WIP |
-| Composer — fractional durations (`d <n>`), tuplets | Working |
+| Composer — fractional durations (`d<n>`), tuplets | Working |
 | Composer — `pc` (absolute & relative), `reg` | Working |
 | Composer — scope types (Sequence, Stack, Set) | Working |
 | Composer — tempo (`<n> bpm`) | Working |
 | Composer — declarations (`ident: exp`) | Initial dispatch in place; semantics partial |
-| Composer — fixed durations (`5'`, `5'2"`) | Grammar defined; pipeline integration pending |
+| Composer — fixed durations (`5'`, `5'2"`) | Grammar defined; composer integration pending |
+| Composer — prefix `d` (duration as prefix keyword) | Planned refactor; grammar still uses atomic scalar form |
 | Composer — dynamics, frequency, amplitude (`A`), bare suffix forms | Stubbed |
 | Composer — infix (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | Stubbed |
 | Scheduler → MIDI | Working — emits a single-track SMF with delta-time events |

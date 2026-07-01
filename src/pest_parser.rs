@@ -10,7 +10,7 @@ use crate::compiler::{ast::*, functional::Monad};
 use std::{path::PathBuf, str::FromStr};
 
 #[derive(Parser)]
-#[grammar = "grammar.pest"]
+#[grammar = "../grammar.pest"]
 pub struct CLParser;
 
 type Rules<'a> = Pairs<'a, Rule>;

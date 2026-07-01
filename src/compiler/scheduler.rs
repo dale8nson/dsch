@@ -140,18 +140,23 @@ fn schedule_context<'a>(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'
             // let playhead = ticks_to_length(scheduler.ticks(), state.tempo(ctx));
 
             if has_children {
-                children
-                    .iter()
-                    .cloned()
-                    .fold(Length::default_max(), |mut length, ctx| {
+                let len = children.len();
+
+                children.iter().cloned().enumerate().fold(
+                    Length::default_max(),
+                    |mut length, (idx, ctx)| {
                         // print_state(state, ctx);
                         let length_ = schedule_context(ctx, state, scheduler);
-                        scheduler.forward(length_to_ticks(length_.min(length), state.tempo(ctx)));
-                        dbg!(&length_);
+                        if idx < len - 1 {
+                            scheduler
+                                .forward(length_to_ticks(length_.min(length), state.tempo(ctx)));
+                        }
+                        dbg!(&length_, scheduler.ticks());
                         length.min(length_)
-                    })
+                    },
+                )
             } else {
-                state
+                let length = state
                     .pcs(ctx)
                     .iter()
                     .cloned()
@@ -170,8 +175,11 @@ fn schedule_context<'a>(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'
                             scheduler
                                 .forward(length_to_ticks(length_.min(length), state.tempo(ctx)));
                             length_.min(length)
+                            // length
                         },
-                    )
+                    );
+                // scheduler.rewind(length_to_ticks(length, state.tempo(ctx)));
+                length
             }
         }
         ScopeType::Stack => {
@@ -433,6 +441,7 @@ fn render_tracks<'a>(scheduler: &mut Scheduler<'a>) -> Vec<Track<'a>> {
     let mut track = Track::new();
     let mut delta = u28::new(0);
     let mut prev_time: u64 = 0;
+    dbg!(&scheduler.schedule);
     for (time, instructions) in scheduler.schedule.iter() {
         // dbg!(time, prev_time);
         delta = u28::new(*time as u32 - prev_time as u32);

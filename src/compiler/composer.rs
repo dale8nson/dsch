@@ -170,11 +170,11 @@ impl State {
         self.current_context_id += 1;
         let id = self.current_context_id;
         let ctx = Ctx::Id(id);
-        // out(
-        //     0,
-        //     0,
-        //     format!("\x1b[0;32mAPPEND CHILD {parent:?} -> {ctx:?}\x1b[0m\n"),
-        // );
+        out(
+            0,
+            0,
+            format!("\x1b[0;32mAPPEND CHILD {parent:?} -> {ctx:?}\x1b[0m\n"),
+        );
         let scope = self.scope_type(parent);
         match scope {
             ScopeType::Sequence => {
@@ -221,7 +221,9 @@ impl State {
         self.contexts_mut().insert(ctx);
         self.parents_mut().insert(ctx, parent);
         self.children_mut().insert(ctx, Vec::<Ctx>::new());
-        self.children.get_mut(&parent).unwrap().push(ctx);
+        if let Some(children) = self.children.get_mut(&parent) {
+            children.push(ctx);
+        };
         self.scope_types_mut().insert(ctx, ScopeType::None);
         self.lengths_mut(ctx).append(&mut lengths);
         self.pcs_mut().insert(ctx, pcs);
@@ -526,14 +528,24 @@ pub fn compose_program(ast: Program) -> State {
     let mut lhs_stack = state.lhs_stack.iter().rev();
     // execute!(stderr(), cursor::Show);
     let mut m = Monad::ret((Exp::Noop, Ctx::Root));
-    for idx in 0..state.rhs_stack.len() {
-        state.inbox_index = idx;
-        if let Some((rhs, rhs_ctx)) = state.rhs_stack.pop() {
-            m = m.bind(Box::new(|(lhs, lhs_ctx)| {
-                combine((lhs, lhs_ctx), (rhs, rhs_ctx), &mut state)
-            }));
-        }
+
+    while let Some((rhs, rhs_ctx)) = state.rhs_stack.pop() {
+        m = m.bind(Box::new(|(lhs, lhs_ctx)| {
+            combine((lhs, lhs_ctx), (rhs, rhs_ctx), &mut state)
+        }));
     }
+    // let mut children = vec![Ctx::Root];
+
+    // while children.len() > 0 {
+    //     children = children
+    //         .iter()
+    //         .fold(Vec::<Ctx>::new(), |mut children_, ctx| {
+    //             print_state(&state, *ctx);
+    //             children_.extend(state.children(*ctx));
+
+    //             children_
+    //         });
+    // }
 
     state.collect_garbage();
     // dbg!(&state);
@@ -547,39 +559,47 @@ fn combine(lhs: (Exp, Ctx), rhs: (Exp, Ctx), state: &mut State) -> Monad<(Exp, C
     let ((lhs, lhs_ctx), (rhs, rhs_ctx)) = (lhs.clone(), rhs.clone());
     let parent = state.parent(lhs_ctx);
 
-    // comment(
-    //     format!(
-    //         "combine {:?} {lhs_ctx:?} {:?} {rhs_ctx:?}",
-    //         state.scope_type(lhs_ctx),
-    //         state.scope_type(rhs_ctx)
-    //     )
-    //     .as_str(),
-    // );
+    comment(
+        format!(
+            "combine {:?} {lhs_ctx:?} {:?} {rhs_ctx:?}",
+            state.scope_type(lhs_ctx),
+            state.scope_type(rhs_ctx)
+        )
+        .as_str(),
+    );
 
-    // graph(state, Ctx::Root, 5);
+    graph(state, Ctx::Root, 5);
     // execute!(
     //     stderr(),
     //     cursor::MoveTo(0, 25),
     //     terminal::Clear(ClearType::CurrentLine)
     // );
 
-    // print_exps(
-    //     &(lhs.clone(), lhs_ctx),
-    //     &(rhs.clone(), rhs_ctx),
-    //     state,
-    //     &state.lhs_stack,
-    //     &state.rhs_stack,
-    // );
+    print_exps(
+        &(lhs.clone(), lhs_ctx),
+        &(rhs.clone(), rhs_ctx),
+        state,
+        &state.lhs_stack,
+        &state.rhs_stack,
+    );
 
     // execute!(stderr(), RestorePosition);
 
     let res = match ((lhs, lhs_ctx), (rhs.clone(), rhs_ctx)) {
         (lhs @ (Exp::Noop, Ctx::None), rhs @ (Exp::Noop, Ctx::None)) => {
-            if let Some(lhs) = state.pop_right() {
-                consume_simples(state, Monad::ret(lhs)).bind(Box::new(|_| {
-                    sequence_children(Ctx::Root, state);
+            if let Some((lhs, lhs_ctx)) = state.pop_right() {
+                // dbg!((&lhs, lhs_ctx));
+                if lhs_ctx != Ctx::None {
+                    print_state(state, lhs_ctx);
+                    // state.set_scope_type(Ctx::Root, ScopeType::Sequence);
+                    consume_simples(state, Monad::ret((lhs, lhs_ctx))).bind(Box::new(|_| {
+                        sequence_children(Ctx::Root, state);
+                        Monad::ret(NOOP)
+                    }))
+                } else {
+                    state.push_left((lhs, lhs_ctx));
                     Monad::ret(NOOP)
-                }))
+                }
             } else {
                 Monad::ret(NOOP)
             }
@@ -627,9 +647,10 @@ fn combine(lhs: (Exp, Ctx), rhs: (Exp, Ctx), state: &mut State) -> Monad<(Exp, C
 
                 combine((rhs.clone(), rhs_ctx), NOOP, state)
             }
-            (lhs_ctx, rhs @ Exp::Simple(Simple::Prefix(_)), rhs_ctx) => {
-                combine((rhs, rhs_ctx), NOOP, state)
-            }
+            (lhs_ctx, rhs @ Exp::Simple(Simple::Prefix(_)), rhs_ctx) => match (lhs_ctx, rhs_ctx) {
+                (Ctx::Root, Ctx::None) => combine((rhs, lhs_ctx), NOOP, state),
+                (_, rhs_ctx) => combine((rhs, rhs_ctx), NOOP, state),
+            },
             (lhs_ctx, rhs @ Exp::Noop, rhs_ctx) => {
                 if let Some((rhs, rhs_ctx)) = state.rhs_stack.pop() {
                     combine((Exp::Noop, lhs_ctx), (rhs, rhs_ctx), state)
@@ -826,18 +847,20 @@ fn combine(lhs: (Exp, Ctx), rhs: (Exp, Ctx), state: &mut State) -> Monad<(Exp, C
     res
 }
 
-fn consume_simples(state: &mut State, m: Monad<(Exp, Ctx)>) -> Monad<(Exp, Ctx)> {
+fn consume_simples(state: &mut State, mut m: Monad<(Exp, Ctx)>) -> Monad<(Exp, Ctx)> {
     if let Some((rhs, rhs_ctx)) = state.rhs_stack.pop() {
-        m.bind(Box::new(|lhs: (Exp, Ctx)| {
-            // out(
-            //     0,
-            //     0,
-            //     format!(
-            //         "{IntenseGreen}CONSUME {} {}{ResetColor}",
-            //         lhs.0.to_string().to_uppercase(),
-            //         rhs.to_string().to_uppercase()
-            //     ),
-            // );
+        // dbg!((&rhs, rhs_ctx));
+        m = m.bind(Box::new(|lhs: (Exp, Ctx)| {
+            out(
+                0,
+                0,
+                format!(
+                    "{IntenseGreen}CONSUME {} {}{ResetColor}",
+                    lhs.0.to_string().to_uppercase(),
+                    rhs.to_string().to_uppercase()
+                ),
+            );
+            // dbg!((&lhs, (&rhs, rhs_ctx)));
             match (lhs, (rhs, rhs_ctx)) {
                 ((Exp::Noop, _), (rhs, rhs_ctx)) => {
                     consume_simples(state, Monad::ret((rhs, rhs_ctx)))
@@ -845,6 +868,8 @@ fn consume_simples(state: &mut State, m: Monad<(Exp, Ctx)>) -> Monad<(Exp, Ctx)>
                 ((Exp::Simple(simple), lhs_ctx), rhs) => {
                     compose_simple(Monad::ret(simple), Monad::ret(rhs), state, lhs_ctx).bind(
                         Box::new(|(lhs, lhs_ctx)| {
+                            dbg!();
+                            print_state(state, lhs_ctx);
                             consume_simples(state, Monad::ret((lhs, lhs_ctx)))
                         }),
                     )
@@ -856,7 +881,9 @@ fn consume_simples(state: &mut State, m: Monad<(Exp, Ctx)>) -> Monad<(Exp, Ctx)>
                     }))
                 }
             }
-        }))
+        }));
+        // dbg!(&m);
+        m
     } else {
         m.bind(Box::new(|(_, lhs_ctx)| Monad::ret((Exp::Noop, lhs_ctx))))
     }
@@ -928,7 +955,8 @@ fn sequence_children(parent: Ctx, state: &mut State) {
                             }
 
                             // dbg!(&ctxs);
-
+                            let lengths = state.lengths(ctxs[0]);
+                            let len = lengths.len();
                             let end = state.lengths(ctxs[0]).iter().cloned().sum::<Length>();
 
                             let mut playhead = Length::MicroSeconds(0);
@@ -1162,7 +1190,7 @@ fn fit(lhs_ctx: Ctx, rhs_ctx: Ctx, state: &mut State) {
     dbg!();
     print_state(state, lhs_ctx);
     print_state(state, rhs_ctx);
-    state.children_mut().get_mut(&rhs_ctx).unwrap().reverse();
+    state.children_mut().get_mut(&rhs_ctx).unwrap();
     if matches!(lhs_ctx, Ctx::None) {
         expand_context(rhs_ctx, state);
         return;
@@ -1176,7 +1204,10 @@ fn fit(lhs_ctx: Ctx, rhs_ctx: Ctx, state: &mut State) {
         .iter()
         .cloned()
         .cycle()
-        .take(f64::round(lhs_lengths_sum as f64 / rhs_lengths_sum as f64) as usize)
+        .take(
+            f64::round(lhs_lengths_sum as f64 / rhs_lengths_sum as f64 * rhs_lengths.len() as f64)
+                as usize,
+        )
         .collect();
     let rhs_lengths_len = rhs_lengths.len();
     let rhs_pcs = state.pcs_mut().get_mut(&rhs_ctx).unwrap();
@@ -1214,7 +1245,7 @@ fn fit(lhs_ctx: Ctx, rhs_ctx: Ctx, state: &mut State) {
             lengths.reverse();
             let tempo = state.tempo(*ctx);
             let mut pcs = state.pcs(*ctx);
-            pcs.reverse();
+            // pcs.reverse();
             let mut velocities = state.velocities(*ctx);
             velocities.reverse();
             // let children = state.children_mut().get_mut(ctx).unwrap();
@@ -1237,6 +1268,8 @@ fn fit(lhs_ctx: Ctx, rhs_ctx: Ctx, state: &mut State) {
 fn expand_context(ctx: Ctx, state: &mut State) {
     let mut children = state.children(ctx);
     let pcs_len = state.pcs(ctx).len();
+    let mut pcs = state.pcs_mut().get_mut(&ctx).unwrap();
+    pcs.reverse();
     print_state(state, ctx);
     let m: usize = if children.len() > 0 {
         children
@@ -1261,7 +1294,6 @@ fn expand_context(ctx: Ctx, state: &mut State) {
     let velocities = state.velocities_mut().get_mut(&ctx).unwrap();
     *velocities = velocities.iter().cloned().cycle().take(pcs_len).collect();
     velocities.reverse();
-    state.pcs_mut().get_mut(&ctx).unwrap().reverse();
     state.children_mut().get_mut(&ctx).unwrap().reverse();
 }
 
