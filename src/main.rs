@@ -2,10 +2,13 @@
 pub mod compiler;
 mod pest_parser;
 
+use std::io::stderr;
+
 use crate::compiler::{ast::*, composer::compose_program, scheduler::schedule};
 use crate::pest_parser::{CLParser, Rule, parse_program};
 
 use clap::Parser;
+use crossterm::{cursor, execute};
 use pest::{Parser as PestParser, set_error_detail};
 
 #[derive(clap::Parser, Debug)]
@@ -33,6 +36,8 @@ fn main() -> Result<()> {
     let state = compose_program(ast);
     let smf = schedule(state);
     let _ = smf.save(format!("{}.mid", args.input));
+
+    execute!(stderr(), cursor::Show);
 
     Ok(())
 }

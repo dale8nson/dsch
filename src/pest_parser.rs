@@ -1,11 +1,13 @@
 #![allow(unused)]
 use pest::{
+    RuleType,
+    error::{Error, ErrorVariant},
     iterators::{Pair, Pairs},
     set_error_detail,
 };
 pub use pest_derive::Parser;
 
-use crate::compiler::{ast::*, functional::Monad};
+use crate::compiler::{ast::*, codegen::*, functional::Monad};
 
 use std::{path::PathBuf, str::FromStr};
 
@@ -29,7 +31,7 @@ pub fn parse_program<'a>(mut pair: Pair<'a, Rule>) -> Result<Program> {
 
 fn parse_exps(mut rules: Rules) -> Result<Vec<Exp>> {
     Ok(rules
-        .map(|rule| parse_exp(rule.into_inner()).unwrap())
+        .map(|rule| parse_exp(rule.into_inner()).unwrap_or_default())
         .collect())
 }
 
@@ -38,28 +40,29 @@ fn parse_exp(mut rules: Rules) -> Result<Exp> {
     // pause();
     let next = rules.next().unwrap();
     let rule = next.as_rule();
-    // // dbg!(&rule);
     let inner = next.into_inner();
 
     Ok(match rule {
         Rule::simple => Exp::Simple(parse_simple(inner)?),
-        Rule::compound => Exp::Compound(Box::new(parse_compound(inner)?)),
+        Rule::compound => Exp::Compound(parse_compound(inner)?),
         _ => unreachable!(),
     })
 }
 
 fn parse_simple(mut rules: Rules) -> Result<Simple> {
     let next = rules.next().unwrap();
-    // // dbg!(&next);
-    let rule = next.as_rule();
-    let inner = next.into_inner();
+    // dbg!(&next);
+    let rule = next.clone().as_rule();
+    // dbg!(&rule);
+    let inner = next.clone().into_inner();
+    // dbg!(&inner);
     match rule {
         Rule::scalar => Ok(Simple::Scalar(parse_scalar(inner)?)),
         Rule::prefix => Ok(Simple::Prefix(parse_prefix(inner)?)),
         Rule::infix => Ok(Simple::Infix(parse_infix(inner)?)),
         Rule::suffix => Ok(Simple::Suffix(parse_suffix(inner)?)),
-        Rule::ident => Ok(Simple::Ident(parse_ident(inner)?)),
-
+        Rule::decl => Ok(Simple::Decl(parse_decl(inner)?)),
+        Rule::ident => Ok(Simple::Ident(parse_ident(next)?)),
         _ => unreachable!(),
     }
 }
@@ -67,13 +70,17 @@ fn parse_simple(mut rules: Rules) -> Result<Simple> {
 fn parse_scalar(mut rules: Rules) -> Result<Scalar> {
     let next = rules.next().unwrap();
     let rule = next.as_rule();
-    let inner = next.into_inner();
+    // dbg!(&rule);
+    let mut inner = next.clone().into_inner();
     match rule {
         Rule::duration => Ok(Scalar::Duration(parse_duration(inner)?)),
         Rule::dynamic => Ok(Scalar::Dynamic(parse_dynamic(inner)?)),
         Rule::frequency => Ok(Scalar::Frequency(parse_frequency(inner)?)),
-        Rule::tempo => Ok(Scalar::Tempo(parse_absolute(inner)?)),
         Rule::pure => Ok(Scalar::Pure(parse_pure(inner)?)),
+        Rule::rest => Ok(Scalar::Rest),
+        Rule::prog => Ok(Scalar::Prog(Prog(
+            parse_integer(inner.next().unwrap())? as u8
+        ))),
         _ => unreachable!(),
     }
 }
@@ -140,8 +147,17 @@ fn parse_fractional(mut rules: Rules) -> Result<Fractional> {
     match rule {
         Rule::absolute => Ok(Fractional::Absolute(parse_absolute(inner)?)),
         Rule::tuplet => Ok(Fractional::Tuplet(parse_tuplet(inner)?)),
+        Rule::rational => Ok(Fractional::Rational(parse_rational(inner)?)),
         _ => unreachable!(),
     }
+}
+
+fn parse_rational(mut rules: Rules) -> Result<Rational> {
+    // dbg!(&rules);
+    Ok(Rational {
+        num: parse_absolute(rules.next().unwrap().into_inner())?,
+        den: parse_absolute(rules.next().unwrap().into_inner())?,
+    })
 }
 
 fn parse_tuplet(mut rules: Rules) -> Result<Tuplet> {
@@ -248,10 +264,10 @@ fn parse_compound(mut rules: Rules) -> Result<Compound> {
 }
 
 fn parse_decl(mut rules: Rules) -> Result<Decl> {
-    let ident = rules.next().unwrap().into_inner();
+    let ident = rules.next().unwrap().as_str();
     let exp = rules.next().unwrap().into_inner();
     Ok(Decl {
-        ident: parse_ident(ident)?,
+        ident: Ident(ident.to_string()),
         binding: Box::new(parse_exp(exp)?),
     })
 }
@@ -268,16 +284,15 @@ fn parse_ratio(mut rules: Rules) -> Result<Vec<Absolute>> {
 }
 
 fn parse_integer(rule: Pair<'_, Rule>) -> Result<u64> {
-    Ok(u64::from_str_radix(rule.as_span().as_str(), 10).unwrap())
+    Ok(u64::from_str_radix(rule.as_str(), 10).unwrap())
 }
 
 fn parse_float(rule: Pair<'_, Rule>) -> Result<f64> {
     f64::from_str(rule.as_span().as_str()).map_err(|err| err.into())
 }
 
-fn parse_ident(mut rules: Rules) -> Result<Ident> {
-    let next = rules.next().unwrap();
-    Ok(Ident(String::from(next.as_span().as_str())))
+fn parse_ident(mut rule: Pair<'_, Rule>) -> Result<Ident> {
+    Ok(Ident(String::from(rule.as_str())))
 }
 
 fn parse_prefix(mut rules: Rules) -> Result<Prefix> {
@@ -289,7 +304,6 @@ fn parse_prefix(mut rules: Rules) -> Result<Prefix> {
         Rule::dur => Prefix::Dur,
         Rule::pc => Prefix::Pc,
         Rule::reg => Prefix::Reg,
-        Rule::rest => Prefix::Rest,
         _ => unreachable!(),
     })
 }

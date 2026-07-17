@@ -1,0 +1,17 @@
+-- test comment
+
+(
+  {
+      d2 reg 2 pc (7 10 8 7)
+      d2 reg 5 pc (7 10 8 7)
+  }
+
+  {
+      d2 reg 2 pc (7 10 8 7)
+      d2 reg 4 pc (7 10 8 7)
+      d2 reg 5 pc (7 10 8 7)
+      d16 reg 1 pc (0 7)
+      d0.75 reg 6 ( pc {0 7} pc {3 10})
+
+  }
+)

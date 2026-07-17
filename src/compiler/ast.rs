@@ -7,20 +7,23 @@ use std::{
     str::FromStr,
 };
 
-use crate::compiler::{codegen, functional::*};
+use crate::compiler::{
+    codegen::{self, *},
+    functional::*,
+};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Program {
     pub exps: Vec<Exp>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub enum Exp {
-    Compound(Box<Compound>),
+    Compound(Compound),
     Simple(Simple),
     #[default]
     Noop,
-    EOS,
+    EOI,
 }
 
 impl Exp {
@@ -45,7 +48,7 @@ impl Display for Exp {
             Exp::Compound(compound) => write!(
                 f,
                 "{}",
-                match **compound {
+                match compound {
                     Compound::Parens(_) => "Compound::Parens",
                     Compound::Braces(_) => "Compound::Braces",
                     Compound::Brackets(_) => "Compound::Brackets",
@@ -63,7 +66,6 @@ impl Display for Exp {
                                 Prefix::Pc => "Prefix::Pc)",
                                 Prefix::Dur => "Prefix::Dur)",
                                 Prefix::Reg => "Prefix::Reg)",
-                                Prefix::Rest => "Prefix::Rest)",
                             }
                     }
                     Simple::Suffix(suffix) => {
@@ -109,16 +111,21 @@ impl Display for Exp {
                             format!("Scalar::Frequency({frequency:?}))")
                                 .parse()
                                 .unwrap(),
-                        Scalar::Tempo(abs) => format!("Scalar::Tempo({abs:?}))").parse().unwrap(),
+                        Scalar::Rest => format!("Scalar::Rest"),
+                        Scalar::Prog(prog) => format!("Scalar::Prog({}))", prog.0),
                         _ => todo!(),
                     }
                     .to_owned(),
+                    Simple::Decl(Decl { ident, binding }) => format!(
+                        "Simple::Decl(Decl {{ ident: {} binding: {binding} }})",
+                        ident.0
+                    ),
                     Simple::Ident(ident) => format!("Simple::Ident({ident:?}))").parse().unwrap(),
                     _ => todo!(),
                 }
             ),
             Exp::Noop => write!(f, "Exp::Noop"),
-            Exp::EOS => write!(f, "Exp::EOS"),
+            Exp::EOI => write!(f, "Exp::EOI"),
         }
     }
 }
@@ -153,6 +160,7 @@ pub enum Simple {
     Scalar(Scalar),
     Infix(Infix),
     Suffix(Suffix),
+    Decl(Decl),
     Ident(Ident),
 }
 
@@ -174,6 +182,33 @@ impl Compound {
             _ => Vec::<Exp>::new(),
         }
     }
+
+    pub fn to_exp(self) -> Exp {
+        match self {
+            Compound::Parens(exps) => Exp::Compound(Compound::Parens(exps)),
+            Compound::Braces(exps) => Exp::Compound(Compound::Braces(exps)),
+            Compound::Brackets(exps) => Exp::Compound(Compound::Brackets(exps)),
+            Compound::Ratio(abss) => Exp::Compound(Compound::Ratio(abss)),
+            Compound::Decl(decl) => Exp::Compound(Compound::Decl(decl)),
+        }
+    }
+
+    pub fn scope(&self) -> Scope {
+        match *self {
+            Compound::Parens(_) => Scope::Sequence,
+            Compound::Braces(_) => Scope::Stack,
+            Compound::Brackets(_) => Scope::Set,
+            _ => Scope::None,
+        }
+    }
+}
+
+impl IntoIterator for Compound {
+    type Item = Exp;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.to_vec().into_iter()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +217,9 @@ pub enum Scalar {
     Frequency(Absolute),
     Pure(Pure),
     Dynamic(String),
-    Tempo(Absolute),
+    Tuplet(Tuplet),
+    Prog(Prog),
+    Rest,
 }
 
 #[derive(Debug, Clone)]
@@ -226,7 +263,6 @@ pub enum Interpolation {
 #[derive(Debug, Clone, Copy)]
 pub enum Prefix {
     Dur,
-    Rest,
     Pc,
     Reg,
 }
@@ -254,6 +290,13 @@ pub struct Fixed {
 pub enum Fractional {
     Absolute(Absolute),
     Tuplet(Tuplet),
+    Rational(Rational),
+}
+
+#[derive(Debug, Clone)]
+pub struct Rational {
+    pub num: Absolute,
+    pub den: Absolute,
 }
 
 #[derive(Debug, Clone)]

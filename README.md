@@ -2,7 +2,7 @@
 
 A compiler for a structured music composition DSL — parses `.dsch` source and lowers it to MIDI.
 
-> **Status: Work in progress / research.** Active development — architecture and API subject to change.
+> **Status: Work in progress / research.** Active development — architecture and API subject to change. The composer and scheduler were rewritten from scratch in this revision; see [Known issues](#known-issues) — none of the checked-in `.dsch` examples currently run to completion.
 
 ## Overview
 
@@ -14,29 +14,36 @@ A compiler for a structured music composition DSL — parses `.dsch` source and 
 dsch/
 ├── Cargo.toml
 ├── grammar.pest               # Active PEG grammar
-├── prototype.dsch              # Reference composition
-├── test.dsch                   # Minimal smoke-test input
+├── test.dsch, 0.dsch, 1.dsch,  # .dsch inputs (mixed grammar generations — see Known issues)
+│   2.dsch, 3.dsch, merge.dsch,
+│   prototype.dsch
 └── src/
     ├── main.rs                # Entry point: CLI → parse → compose → schedule → MIDI
     ├── lib.rs                 # Library crate root — re-exports compiler modules
     ├── pest_parser.rs         # Pest PEG parser → AST
+    ├── track.rs               # Unused scaffolding (`Seq<T>` layer builder) — not wired into lib.rs
     └── compiler/
         ├── mod.rs
         ├── ast.rs             # AST type definitions
         ├── functional.rs      # Monad / Functor / Combinator scaffolding
-        ├── composer.rs        # Fold over AST → scoped-context arena
-        ├── codegen.rs         # MIDI-domain types (PPQ, Length, Mpb, Velocity, Ctx, Pc, Register, Context, …)
-        └── scheduler.rs       # Context tree → time-stamped MIDI track
+        ├── composer.rs        # Fold over AST → scoped-context arena (rewritten, see below)
+        ├── codegen/
+        │   ├── mod.rs         # MIDI-domain types (PPQ, Length, Mpb, Velocity, Ctx, Pc, Register, Prog, Instruction, …)
+        │   ├── state.rs       # `State` — context arena + the new post-composition `sequence` merge pass
+        │   └── utils.rs       # `length_to_ticks`, `gcd`, terminal debug-print helpers (`out`, `graph`, `print_state`)
+        └── scheduler.rs       # Timeline → time-stamped MIDI track
 ```
+
+`codegen.rs` (a single 618-line file) has been split into a `codegen/` module. The most significant change is that `State` — the context arena that used to live in `composer.rs` — moved to `codegen::state::State`, and it now owns the post-composition sequencing pass (`State::sequence`) that used to be composer-side (`sequence_children`). Composer and scheduler both consume this shared `State`.
 
 ## The `.dsch` DSL
 
 `.dsch` is an expression-oriented language for algorithmic music composition drawing on two programming paradigms:
 
-- **Concatenative** — at the surface level, meaning arises from juxtaposition. Placing expressions next to each other implicitly threads a musical context from left to right, with no explicit binding operator. `d4 (120 144 60 120) bpm` is three tokens in sequence: a duration that sets context, a list that supplies values, and a suffix keyword that consumes them. This is the same model used by languages like Forth and Joy.
-- **Functional** — internally, AST nodes compose through the `Monad<Exp>::bind` operator in `functional.rs`, and the compiler pipeline is a left-to-right fold of those binds. Concatenative languages often have this property: Joy's formal semantics are defined entirely in terms of function composition. A planned extension will bring Haskell-style syntax to the DSL itself — allowing users to define higher-kinded types, custom data types, and functions directly in `.dsch` files. This will make the language self-extensible: composers can build and share libraries of reusable abstractions (scales, rhythmic patterns, transformations) in the same language they write music in.
+- **Concatenative** — at the surface level, meaning arises from juxtaposition. Placing expressions next to each other implicitly threads a musical context from left to right, with no explicit binding operator. This is the same model used by languages like Forth and Joy.
+- **Functional** — internally, AST nodes compose through the `Monad<Exp>::bind` operator in `functional.rs`. A planned extension will bring Haskell-style syntax to the DSL itself — allowing users to define higher-kinded types, custom data types, and functions directly in `.dsch` files.
 
-Programs are nested expressions that specify duration, tempo, pitch, register, dynamics, and rhythm.
+Programs are nested expressions that specify duration, tempo, pitch, register, dynamics, program (instrument), and rhythm.
 
 **Grouping semantics:**
 
@@ -54,21 +61,23 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 | `<n>` `<n>.<n>` `+<n>` `-<n>` | Numbers — integer, float, signed (relative) |
 | `d<n>` | Fractional duration (no space) — e.g. `d4` = quarter note, `d8` = eighth note |
 | `d<a>:<b>` | Tuplet duration — `a` notes in the time of `b` |
+| `d<a>/<b>` | Rational duration — new this revision, e.g. `d3/16` |
 | `5'` `2"` `5'2"` | Fixed duration — minutes, seconds, or combined |
 | `<n> bpm` | Tempo |
 | `<n>Hz` | Frequency |
+| `#<n>` | MIDI program (instrument) change — new this revision, e.g. `#48` for strings |
+| `~` | Rest — moved from a prefix token to a scalar this revision |
 | `ppp` `pp` `p` `mp` `mf` `f` `ff` `fff` | Discrete dynamic level |
 
-> **Note:** `d<n>` duration forms are atomic in the grammar — no whitespace is allowed between `d` and the number. `d4` parses as a duration scalar; `d 4` would parse `d` as an identifier. A planned refactor will move duration to a proper prefix so spacing is irrelevant, but this requires additional composer work.
+> **Note:** `d<n>` duration forms are atomic in the grammar — no whitespace is allowed between `d` and the number. `d4` parses as a duration scalar; `d 4` would parse `d` as an identifier.
 
 **Prefix:**
 
 | Token | Meaning |
 |-------|---------|
 | `pc` | Pitch class — bind the following value(s) as pitch classes |
-| `reg` | Register (octave) |
+| `@` | Register (octave) — **changed this revision**, was the word `reg` |
 | `d` | Duration prefix (planned — not yet dispatched in the composer) |
-| `~` | Rest |
 
 **Suffix:**
 
@@ -76,7 +85,7 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 |-------|---------|
 | `bpm` | Apply a tempo to the preceding compound |
 | `Hz`  | Apply a frequency to the preceding compound |
-| `A`   | Amplitude (velocity) |
+| `^`   | Amplitude (velocity) — **changed this revision**, was `A` |
 
 **Infix:**
 
@@ -85,46 +94,41 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 | `:`   | Ratio separator |
 | `><`  | Intercalate — interleave two sequences |
 | `..`  | Range — inclusive discrete enumeration between two values |
-| `<`   | Interpolate upward — continuously ramp from the left operand to the right |
-| `>`   | Interpolate downward — continuously ramp from the left operand to the right |
+| `<`   | Interpolate upward |
+| `>`   | Interpolate downward |
 | `+` `-` `*` `/` | Arithmetic on numeric operands |
-
-`<` and `>` are general interpolation operators rather than dynamics-specific symbols. The parameter being interpolated is determined by the values they connect and the surrounding context: `mp < f` is a crescendo, `120 < 144 bpm` is an accelerando, `220 < 440 Hz` is a glissando, `pc 0 < 12` is a pitch glide of an octave, and so on. `..` and `<`/`>` together form the language's two-axis taxonomy of change over time — discrete enumeration vs. continuous sweep. The range `..` is inclusive at both ends, matching how composers naturally think about musical ranges ("from C to G" includes G).
-
-`...` is reserved for ellipsis semantics in a future revision of the language — continuation, repetition, or "and so on" — and is intentionally kept distinct from `..`.
 
 **Bindings:**
 
-`ident: exp` declares a named expression. Identifiers are alphanumeric (with underscores) and may carry `'` (prime) suffixes — useful for related variants like `theme`, `theme'`, `theme''`. Bindings are stored per-context in the composer's `bindings` arena.
+`ident: exp` declares a named expression. Identifiers are alphanumeric (with underscores) and may carry `'` (prime) suffixes. Declarations moved this revision from being a `Compound` variant to a first-class `Simple::Decl`, matching how the grammar already treated `decl` as an alternative of `simple` rather than `compound`.
 
-### Example
+**Comments:** `-- comment text` runs to end of line. Comments are enabled this revision (`COMMENT` was previously commented out in the grammar).
+
+### Example (new `@` / `#` syntax, from `1.dsch`)
 
 ```
-5' (
-  d4 (120 144 60 120) bpm
-  2:5:7:3 (
-    3:7:5:2 (
-      5:3:2:7 (
-        7:2:3:5 (
-          {
-            pc (
-              (5 3 2 7)
-              (7 2 3 5)
-              (2 5 7 3)
-              (3 7 5 2)
-            )
-            d (7.75 4.5 8 8.5)
-            >< ~ (4.25 4 4.5)
-            reg (4 5)
-          }
-        )
-      )
-    )
-  )
-)
+-- WORDS --
+Strings: #48
+Violin: #40
+Cello: #42
+C#: 1 D: 2 E: 4 F#: 6 G: 7 A: 9 B: 11
+Piano: #0
+ost: (d4 @3 D @2 A B F# G D G A )
+ln1: (d4 @5 F# E D C# @4 B A B @5 C#)
+
+-- COMPOSITION --
+50 bpm
+
+mf ost
+
+{
+  mf
+  ost
+  ln1
+}
 ```
 
-This specifies a 5-minute composition, subdivided by nested ratios, with quarter-note durations, cycling BPM values, pitch-class sets interleaved with rests across two registers.
+This binds named voices (`ost`, `ln1`, …) built from duration + register + pitch-class tokens, then layers them into `{...}` stacks — a chorale-style texture growing one voice at a time. Note this file uses bindings (`ident: exp`) as short, single-letter-style pitch names (`C#: 1`) rather than defining a scale DSL; `C#` here is just an identifier bound to the pitch class `1`.
 
 ## Compiler pipeline
 
@@ -135,73 +139,84 @@ This specifies a 5-minute composition, subdivided by nested ratios, with quarter
     ▼
   Program AST
     │
-    │  Composer — left-to-right fold over AST,
-    │  producing a tree of scoped contexts:
+    │  Composer — recursive descent over AST, driven by `State` as an iterator
+    │  (State::next() pulls the next Exp), building a tree of scoped contexts:
     │  duration · pitch class · tempo · register · velocity · program · bindings
     ▼
-  State (Ctx arena: parents · children · scope_types · lengths · pcs · tempos · bpms ·
-                    registers · velocities · programs · bindings · stack · garbage)
+  State (Ctx arena: parents · children · scopes · pcs · lengths · velocities ·
+                    registers · tempos · programs · bindings)
     │
-    │  Scheduler — walks the context tree, fills a BTreeMap<Ticks, Vec<Instruction>>,
-    │  emits a single MIDI track with delta-time encoding
+    │  State::sequence — post-composition pass. Walks Stack/Sequence structure
+    │  and merges concurrent Sequence children into synthetic Stack nodes
+    │  (`combine_sequences`), producing a flat `timeline: Vec<(u64, Ctx)>`
+    │  of time-stamped contexts.
+    ▼
+  Scheduler — walks the timeline in order, forwarding the clock between
+    entries and emitting NoteOn/NoteOff, ProgramChange, and Tempo events
+    into a BTreeMap<Ticks, Vec<Instruction>>
     ▼
   MIDI (midly::Smf, PPQ = 25200)
 ```
 
 ### Parser
 
-A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walker in `pest_parser.rs` that builds the typed AST defined in `compiler/ast.rs`. The AST is rooted at `Exp = Compound | Simple | Noop | EOS`, with `Simple = Prefix | Scalar | Infix | Suffix | Ident` mirroring the grammar's fixity-based taxonomy.
+A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walker in `pest_parser.rs` that builds the typed AST defined in `compiler/ast.rs`. The AST is rooted at `Exp = Compound | Simple | Noop | EOI` (renamed from `EOS` this revision), with `Simple = Prefix | Scalar | Infix | Suffix | Decl | Ident`. `Compound` is no longer boxed (`Exp::Compound(Compound)`, not `Exp::Compound(Box<Compound>)`).
 
-### Composer
+### Composer — rewritten this revision
 
-The composer in `compiler/composer.rs` runs in two phases.
+`compiler/composer.rs` shrank from ~2,900 lines to 353. The old design pushed the whole program onto explicit `rhs_stack`/`lhs_stack` vectors and drained them through a large `combine` dispatcher with dedicated stack-merging helpers (`consume_right_assoc_exps`, `consume_simples`, `merge_sequences`, `fit`, `expand_context`, …). That machinery has been replaced:
 
-**Phase 1 — left-to-right fold.** The program expression list (plus a sentinel `EOS`) is pushed onto an `rhs_stack`. A `Monad::ret` seed is then driven through a loop: each iteration pops one token from the `rhs_stack` and passes it to `combine`, which pattern-matches on the `(lhs, rhs)` pair and dispatches via `Monad::bind` to a specialised composer:
+- `State` itself now implements `Iterator<Item = Exp>` over the current expression list (`state.exps`, `state.index`); `state.next()` pulls the next token, and `state.set_exps` swaps in a new list (e.g. when recursing into a compound), returning the old one so it can be restored on the way back out (`compose_compound`).
+- `compose_exp` dispatches on `Exp` (`Compound` / `Simple` / `Noop` / `EOI`); `compose_simple` dispatches on `Simple` (`Prefix` / `Infix` / `Suffix` / `Decl` / `Scalar` / `Ident`) — a direct match instead of a stack-driven combine.
+- Polyphonic merging (what used to be `sequence_children`/`merge_sequences` in composer.rs) has moved to `State::sequence` / `State::combine_sequences` in `codegen/state.rs`, run once at the end of `compose_program`, after the full tree is built.
 
-- `compose_simple` → `compose_prefix` / `compose_scalar` / `compose_infix` / `compose_suffix` / `compose_ident`
-- `compose_scalar` → `compose_duration` / `compose_fractional` / `compose_tempo` / `compose_dynamic` / `compose_frequency` / `compose_pure`
-- `compose_prefix` handles `pc`, `reg`, `d` (dur), and `~` (rest); `pc` and `d` distribute themselves over compound arguments by reinserting a rewritten compound back onto the stack
-- `compose_infix` — `Mul` is implemented (`(expr) * n` repeats a sequence `n` times); other forms remain `todo!()`
-- `compose_decl` stores `ident → exp` in the per-context bindings map; `compose_ident` looks the binding up
+**Composer coverage is currently partial** — several branches are `todo!()` stubs left mid-refactor:
 
-Supporting reduction helpers extracted from `combine`: `consume_right_assoc_exps` (drains the lhs-stack for right-associative compound application), `consume_simples` (recursively folds simple tokens off the rhs-stack), `combine_subcomponents` (processes the contents of a compound once loaded onto the rhs-stack), and `consume_sequences` / `merge_sequences` (handles multiple `(...)` sequences inside a `{...}` stack). The older `drain_stack` pass has been removed.
-
-**Phase 2 — `sequence_children` post-composition pass.** After the fold, `sequence_children` recursively restructures the context arena to handle mixed Stack+Sequence trees. For a Stack parent containing Sequence children of different lengths it runs a playhead loop (stepping by the GCD of all child lengths) and calls `take_note` at each beat to extract individual note events into freshly allocated Stack nodes, effectively unrolling the polyphonic grid. `fit` cycles a shorter sequence up to match the total length of a longer one; `expand_context` cycles a context's `pcs`/`lengths`/`velocities` arrays to fill the required count; `merge_sequences` builds a `BTreeMap<u64, Ctx>` of time-stamped Stack nodes and replaces the original children list with the flattened result.
-
-**State arena.** `Ctx::Id(usize)` indexes into parallel `HashMap`s for `parents`, `children`, `scope_types`, `lengths`, `pcs`, `tempos`, `bpms`, `registers`, `velocities`, `programs`, and `bindings`. Three arena-mutation operations work alongside `append_child`: `empty_child` (allocates a zeroed child with no parent-field inheritance, used for structural intermediates), `move_child` (reparents a node from one context to another), and `drop` (immediately removes a context from all maps). Contexts queued for deferred removal go into a `garbage` list and are cleaned up by `collect_garbage` at the end of `compose_program`. Children inherit tempo, register, velocity, and program from their parent at `append_child` time.
-
-**Debug infrastructure.** The composer includes a `graph` function (currently commented out in production paths) that uses `rust-sugiyama` to compute a Sugiyama-style layered layout of the context tree and renders it to stderr via `colonnade`. `print_exps` renders a 3-column lhs-stack / current-context-state / rhs-stack view; `print_state` shows per-context fields. These are wired to toggle via the commented `out(...)` / `execute!(...)` calls throughout the file.
+| Composer path | Status |
+|---|---|
+| Bare pitch-class numbers (`0 3 7 10`), tempo (`bpm`), tuplet/rational/absolute durations, dynamics, program change (`#n`), register scalar (`@n`), declarations/bindings | Working |
+| `pc` prefix (any argument form) | `todo!()` — unimplemented this revision |
+| `reg`/`@` prefix with a compound argument (e.g. `@ (4 5)`) | `todo!()` |
+| `compose_infix` (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | `todo!()` |
+| `compose_suffix` (`^`, `bpm`, `Hz` as bare suffixes) | `todo!()` |
+| Fixed durations (`5'`, `5'2"`) | `todo!()` |
+| Relative numbers (`+n`, `-n`) | `todo!()` |
 
 ### Codegen types
 
-`compiler/codegen.rs` defines the MIDI-domain types used downstream of the composer: `PPQ` (25200 ticks per quarter — chosen for high divisibility), `MicroSeconds`, `Length`, `Mpb` (microseconds per beat — the internal tempo representation), `Velocity`, `Pc` (`Class(i8) | None`), `Prog`, `Register` (`Reg(i8) | None`), `Context` (a flat per-`Ctx` record of all parallel-vec fields), and an `Instruction` enum with `Midi(MidiMessage)` / `Meta(MetaMessage)` variants. Helpers convert between time domains: `to_length` (fractional → microseconds), `duration_to_micros` (fixed → microseconds), `length_to_ticks` (microseconds → PPQ ticks at a given tempo).
+`codegen/mod.rs` defines the MIDI-domain types: `PPQ` (25200 ticks per quarter), `Length`, `Mpb` (microseconds per beat), `Velocity`, `Pc` (`Class(u8) | None`), `Prog` (MIDI program number, new this revision), `Register` (`Reg(i8) | None`), `Ctx` (arena index; `Ctx::Root` now compares equal to `Ctx::Id(0)`), and `Instruction` (`Midi` / `Meta`). A `Data`/`Type` pair of enums (`Pc`/`Length`/`Velocity`/`Program`/`Tempo`/`Register`) backs a small type-erased `State::take_last::<T>()` accessor via `TypeId`.
 
-### Scheduler
+### `State` (`codegen/state.rs`) — new this revision
 
-`compiler/scheduler.rs` consumes the composed `State` and emits a `midly::Smf`. The earlier playhead-loop + `get_counters` approach has been replaced by a recursive `schedule_context` that dispatches cleanly per `ScopeType`:
+`State` owns the context arena (`parents`, `children`, `scopes`, and parallel per-field vectors for `pcs`/`lengths`/`velocities`/`registers`/`tempos`/`programs`, plus per-context `bindings`) and now also the `timeline: Vec<(u64, Ctx)>` and `playhead: Length` used by the merge pass. Fields are appended (not overwritten) as the composer walks the tree — `add_pc`, `add_length`, etc. — with `pad`/`cycle_fill`/`resize` helpers to align differently-sized parallel arrays before merging.
 
-- `ScopeType::None` — folds over children, accumulating total length without advancing the clock
-- `ScopeType::Sequence` — iterates children (or leaf note events) left-to-right, advancing the clock by `length_to_ticks(length, tempo)` after each
-- `ScopeType::Stack` — iterates children without advancing the clock between them (all play simultaneously), returning the minimum child length
+`State::sequence(ctx)` recurses down `Scope::Sequence` nodes and, on reaching a `Scope::Stack` node whose children are `Scope::Sequence`, calls `combine_sequences` on that set of children. `combine_sequences` cycle-fills each sequence to a common total length, then walks all of them in lock-step by their per-event lengths (a manual playhead loop, replacing the old GCD-stepped loop), allocating a fresh `Scope::Stack` child per playhead tick and appending a `(tick, ctx)` pair to `state.timeline()` for each one.
 
-For leaf contexts, `schedule_note` inserts a `NoteOn`/`NoteOff` pair (zero-velocity `NoteOn` for note-off) into a `BTreeMap<Ticks, Vec<Instruction>>` keyed by absolute tick time. Tempo changes emit as `MetaMessage::Tempo`; an initial `ProgramChange` is inserted at tick 0. `render_tracks` iterates the map in ascending time order and converts absolute ticks to delta-time `TrackEvent`s for a single-track SMF. A `visited: HashSet<Ctx>` field on `Scheduler` is reserved for future cycle detection.
+### Scheduler — rewritten this revision
+
+`compiler/scheduler.rs` no longer recurses the full context tree at schedule time. `schedule()` now iterates `state.timeline()` directly: for each `(t, ctx)` entry it converts `t` (microseconds) to ticks at the context's current tempo, computes `delta_ticks` from the scheduler's current position, calls `scheduler.forward(delta_ticks)`, and dispatches `schedule_context(ctx, ...)` — which now only has two live branches, `Scope::Sequence` (walk pcs/lengths/velocities/registers/tempos/programs in lock-step, emitting a note and advancing the clock after each) and `Scope::Stack` (emit all pcs simultaneously, using the minimum length). `Scheduler::set_program`/`set_tempo` emit a `ProgramChange`/`Tempo` meta event only when the value actually changes.
+
+## Known issues
+
+None of the `.dsch` files currently checked into the repo run start-to-finish on this branch:
+
+- **`0.dsch`, `1.dsch`, `2.dsch`** (new `@`/`#` syntax) reliably panic inside `State::combine_sequences`. `codegen/state.rs:718` calls the debug visualizer `graph(self, self.parent(ctx))` **unconditionally** inside the merge loop — every other call site for `graph`/`print_state` in the codebase is commented out, but this one is live. `graph()` calls `crossterm::terminal::size()`, which errors (`WouldBlock`) whenever stdout isn't a TTY (e.g. piped output, CI), and even attached to a real terminal it currently panics via `rust-sugiyama`'s `assert!(!is_cyclic_directed(...))` — the context graph it snapshots mid-merge is not yet a DAG at the point `graph()` is invoked. This call should either be removed/feature-gated or the graph build deferred until the merge completes.
+- **`test.dsch`, `merge.dsch`, `3.dsch`** (older `reg <n> pc (...)` syntax) stack-overflow. `reg` is no longer a grammar keyword — the `reg` prefix token now requires `@` — so bare `reg` text falls through to the generic `ident` rule and composes as an unbound, silently-swallowed identifier, while `pc` still parses as `Prefix::Pc`, which is `todo!()` (see composer table above). Deeply nested `.dsch` files reach that `todo!()` (or otherwise recurse very deep through `compose_compound`) before running out of stack. These files need to be ported to `@`-syntax and rewritten to avoid `pc` prefix usage, or `pc` needs an implementation, before they're useful smoke tests again.
+- **`prototype.dsch`** no longer parses at all — it predates this revision's grammar (still uses the old `reg` keyword and `5'` fixed-duration usage in a position the current grammar doesn't accept at top level). It documents the target long-term DSL shape but is not currently runnable.
+- `src/track.rs` (`Seq<T>` layer builder) is not referenced from `lib.rs`/`mod.rs` and appears to be disconnected scaffolding.
+- `num-rational` is listed as a dependency but is unused — the new `Rational` duration form (`d<a>/<b>`) is computed directly as `f64` in `compose_fractional_duration` rather than through the crate.
 
 ## Implementation status
 
 | Stage | Status |
 |-------|--------|
-| Parser (grammar + AST) | Complete |
-| Grammar — arithmetic infix (`+`, `-`, `*`, `/`) | In grammar; composer dispatch WIP |
-| Composer — fractional durations (`d<n>`), tuplets | Working |
-| Composer — `pc` (absolute & relative), `reg` | Working |
-| Composer — scope types (Sequence, Stack, Set) | Working |
-| Composer — tempo (`<n> bpm`) | Working |
-| Composer — declarations (`ident: exp`) | Initial dispatch in place; semantics partial |
-| Composer — fixed durations (`5'`, `5'2"`) | Grammar defined; composer integration pending |
-| Composer — prefix `d` (duration as prefix keyword) | Planned refactor; grammar still uses atomic scalar form |
-| Composer — dynamics, frequency, amplitude (`A`), bare suffix forms | Stubbed |
-| Composer — infix (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | Stubbed |
-| Scheduler → MIDI | Working — emits a single-track SMF with delta-time events |
+| Parser (grammar + AST) | Complete for the syntax exercised in `0.dsch`/`1.dsch`/`2.dsch`; `prototype.dsch`'s older syntax no longer parses |
+| Composer — bare pitch classes, tuplet/rational/absolute durations, tempo, program change, `@` register, bindings | Working |
+| Composer — `pc` prefix | Not implemented (`todo!()`) |
+| Composer — infix (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | Not implemented (`todo!()`) |
+| Composer — suffix (`^`, bare `bpm`/`Hz`), fixed durations, relative numbers | Not implemented (`todo!()`) |
+| `State::sequence` polyphonic merge → timeline | Implemented, but currently panics via a live debug `graph()` call — see Known issues |
+| Scheduler → MIDI | Implemented against the new timeline; untested end-to-end because every example currently fails upstream |
 
 ## Running
 
@@ -210,7 +225,7 @@ For leaf contexts, `schedule_note` inserts a `NoteOn`/`NoteOff` pair (zero-veloc
 cargo run -- --input <name>
 ```
 
-For example, `cargo run -- --input test` parses `test.dsch`, composes it, schedules MIDI events, and writes `test.mid`.
+For example, `cargo run -- --input 0` parses `0.dsch`, composes it, sequences it, schedules MIDI events, and writes `0.mid` — though see [Known issues](#known-issues) for why this currently panics before finishing.
 
 ## Built with
 
@@ -218,8 +233,8 @@ For example, `cargo run -- --input test` parses `test.dsch`, composes it, schedu
 - [`pest_derive`](https://github.com/pest-parser/pest) — derive macro for typed Pest grammars
 - [`midly`](https://github.com/kovaxis/midly) — MIDI file I/O
 - [`clap`](https://github.com/clap-rs/clap) — CLI argument parsing (`--input <name>`)
-- [`num-rational`](https://github.com/rust-num/num-rational) — exact rational arithmetic for ratios and tuplets
-- [`crossterm`](https://github.com/crossterm-rs/crossterm) — cross-platform terminal control (used for debug/progress output)
+- [`num-rational`](https://github.com/rust-num/num-rational) — declared dependency; not currently used (see Known issues)
+- [`crossterm`](https://github.com/crossterm-rs/crossterm) — cross-platform terminal control (used for debug/progress output; see Known issues for a case where this is load-bearing for a crash)
 - [`colonnade`](https://github.com/dfhoughton/colonnade) — aligned terminal column formatting for state inspection
 - [`colprint`](https://crates.io/crates/colprint) — coloured terminal output helpers
 - [`rust-sugiyama`](https://github.com/paddison/rust-sugiyama) — Sugiyama-style layered graph layout (context-tree visualisation)
