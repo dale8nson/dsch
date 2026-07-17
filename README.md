@@ -2,7 +2,7 @@
 
 A compiler for a structured music composition DSL — parses `.dsch` source and lowers it to MIDI.
 
-> **Status: Work in progress / research.** Active development — architecture and API subject to change. The composer and scheduler were rewritten from scratch in this revision; see [Known issues](#known-issues) — none of the checked-in `.dsch` examples currently run to completion.
+> **Status: Work in progress / research.** Active development — architecture and API subject to change. The composer and scheduler were rewritten from scratch in this revision. `1.dsch` is the current smoke test and does compile end-to-end, though a timing bug in the output is still being tracked down; see [Known issues](#known-issues) for the rest.
 
 ## Overview
 
@@ -198,10 +198,9 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 
 ## Known issues
 
-None of the `.dsch` files currently checked into the repo run start-to-finish on this branch:
-
-- **`0.dsch`, `1.dsch`, `2.dsch`** (new `@`/`#` syntax) reliably panic inside `State::combine_sequences`. `codegen/state.rs:718` calls the debug visualizer `graph(self, self.parent(ctx))` **unconditionally** inside the merge loop — every other call site for `graph`/`print_state` in the codebase is commented out, but this one is live. `graph()` calls `crossterm::terminal::size()`, which errors (`WouldBlock`) whenever stdout isn't a TTY (e.g. piped output, CI), and even attached to a real terminal it currently panics via `rust-sugiyama`'s `assert!(!is_cyclic_directed(...))` — the context graph it snapshots mid-merge is not yet a DAG at the point `graph()` is invoked. This call should either be removed/feature-gated or the graph build deferred until the merge completes.
-- **`test.dsch`, `merge.dsch`, `3.dsch`** (older `reg <n> pc (...)` syntax) stack-overflow. `reg` is no longer a grammar keyword — the `reg` prefix token now requires `@` — so bare `reg` text falls through to the generic `ident` rule and composes as an unbound, silently-swallowed identifier, while `pc` still parses as `Prefix::Pc`, which is `todo!()` (see composer table above). Deeply nested `.dsch` files reach that `todo!()` (or otherwise recurse very deep through `compose_compound`) before running out of stack. These files need to be ported to `@`-syntax and rewritten to avoid `pc` prefix usage, or `pc` needs an implementation, before they're useful smoke tests again.
+- **Timing bug in scheduled output.** `1.dsch` — the current smoke test, using the new `@`/`#` syntax — composes and schedules to a `.mid` file successfully, but the author is still tracking down a timing discrepancy in the result. Likely areas: the `delta_ticks`/`forward` bookkeeping in `schedule()` ([scheduler.rs](src/compiler/scheduler.rs)) that steps the clock between `state.timeline()` entries, or the playhead loop in `State::combine_sequences` ([state.rs](src/compiler/codegen/state.rs)) that decides where each merged Stack node lands on the timeline.
+- **The debug graph visualizer is fragile and shouldn't be relied on.** `codegen/state.rs:718` calls `graph(self, self.parent(ctx))` **unconditionally** inside the `combine_sequences` merge loop — every other call site for `graph`/`print_state` in the codebase is commented out, but this one is live. `graph()` sizes its ASCII layout off `crossterm::terminal::size()` and feeds it through `rust-sugiyama`; in a non-interactive or narrow-terminal environment (piped output, CI, some sandboxes) this reliably panics — I hit `WouldBlock` from `size()`, a `rust-sugiyama` cyclic-graph assertion, and a `column_width` integer underflow/capacity overflow across different runs and build profiles here, none of which reproduced for the author running interactively. Since it's wired into the merge hot path rather than gated behind a flag, anyone running `.dsch` files non-interactively (CI, scripts, narrow terminals) should expect it to crash. Worth removing or feature-gating.
+- **`test.dsch`, `merge.dsch`, `3.dsch`** (older `reg <n> pc (...)` syntax) stack-overflow. `reg` is no longer a grammar keyword — the `reg` prefix token now requires `@` — so bare `reg` text falls through to the generic `ident` rule and composes as an unbound, silently-swallowed identifier, while `pc` still parses as `Prefix::Pc`, which is `todo!()` (see composer table above). These files need to be ported to `@`-syntax and rewritten to avoid `pc` prefix usage, or `pc` needs an implementation, before they're useful smoke tests again.
 - **`prototype.dsch`** no longer parses at all — it predates this revision's grammar (still uses the old `reg` keyword and `5'` fixed-duration usage in a position the current grammar doesn't accept at top level). It documents the target long-term DSL shape but is not currently runnable.
 - `src/track.rs` (`Seq<T>` layer builder) is not referenced from `lib.rs`/`mod.rs` and appears to be disconnected scaffolding.
 - `num-rational` is listed as a dependency but is unused — the new `Rational` duration form (`d<a>/<b>`) is computed directly as `f64` in `compose_fractional_duration` rather than through the crate.
@@ -215,8 +214,8 @@ None of the `.dsch` files currently checked into the repo run start-to-finish on
 | Composer — `pc` prefix | Not implemented (`todo!()`) |
 | Composer — infix (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | Not implemented (`todo!()`) |
 | Composer — suffix (`^`, bare `bpm`/`Hz`), fixed durations, relative numbers | Not implemented (`todo!()`) |
-| `State::sequence` polyphonic merge → timeline | Implemented, but currently panics via a live debug `graph()` call — see Known issues |
-| Scheduler → MIDI | Implemented against the new timeline; untested end-to-end because every example currently fails upstream |
+| `State::sequence` polyphonic merge → timeline | Working (`1.dsch`) — the live debug `graph()` call in the merge loop is a separate reliability risk, see Known issues |
+| Scheduler → MIDI | Working (`1.dsch` produces a `.mid`), but a timing bug in the scheduled output is still being tracked down — see Known issues |
 
 ## Running
 
@@ -225,7 +224,7 @@ None of the `.dsch` files currently checked into the repo run start-to-finish on
 cargo run -- --input <name>
 ```
 
-For example, `cargo run -- --input 0` parses `0.dsch`, composes it, sequences it, schedules MIDI events, and writes `0.mid` — though see [Known issues](#known-issues) for why this currently panics before finishing.
+For example, `cargo run -- --input 1` parses `1.dsch`, composes it, sequences it, schedules MIDI events, and writes `1.mid`. `0.dsch`/`2.dsch`/`3.dsch` are older or in-progress fixtures — see [Known issues](#known-issues) for which composer paths they still need.
 
 ## Built with
 
