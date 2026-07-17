@@ -1,0 +1,54 @@
+-- WORDS --
+Strings: #48
+Violin: #40
+Cello: #42
+C#: 1 D: 2 E: 4 F#: 6 G: 7 A: 9 B: 11
+Piano: #0
+ost: (d4 @3 D @2 A B F# G D G A )
+ln1: (d4 @5 F# E D C# @4 B A B @5 C#)
+ln2: (d4 @5 D C# @4 B A G F# G E)
+ln3: (d8 @4 D F# A G F# D F# E D @3 B @4 D A G B A G)
+ln4: (d8 @4 F# D E @5 C# D F# A @4 A B G A F# D @5 D d3/16 D d16 C#)
+ln5: (d16 @5 D C# D @4 D C# A E F# D @5 D C# @4 B @5 C# E A B G F# E G F# E D C# @4 B A G F# B A G)
+
+-- COMPOSITION --
+50 bpm
+
+mf ost
+
+{
+  mf
+  ost
+  ln1
+}
+
+{
+  mf
+  ost
+  ln1
+  ln2
+}
+
+{
+  mf
+  ost
+  ln1
+  ln2
+  ln3
+}
+
+{
+  mf
+  ost
+  ln2
+  ln3
+  ln4
+}
+
+{
+  mf
+  ost
+  ln3
+  ln4
+  ln5
+}
