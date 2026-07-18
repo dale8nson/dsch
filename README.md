@@ -2,7 +2,7 @@
 
 A compiler for a structured music composition DSL — parses `.dsch` source and lowers it to MIDI.
 
-> **Status: Work in progress / research.** Active development — architecture and API subject to change. The composer and scheduler were rewritten from scratch in this revision. `1.dsch` is the current smoke test and does compile end-to-end, though a timing bug in the output is still being tracked down; see [Known issues](#known-issues) for the rest.
+> **Status: Work in progress / research.** Active development — architecture and API subject to change. The composer and scheduler were rewritten from scratch in this revision; all checked-in `.dsch` fixtures now compile and schedule to MIDI, including the timing fix for stacked sequences of differing lengths. See [Known issues](#known-issues) for what's still incomplete.
 
 ## Overview
 
@@ -14,9 +14,10 @@ A compiler for a structured music composition DSL — parses `.dsch` source and 
 dsch/
 ├── Cargo.toml
 ├── grammar.pest               # Active PEG grammar
-├── test.dsch, 0.dsch, 1.dsch,  # .dsch inputs (mixed grammar generations — see Known issues)
-│   2.dsch, 3.dsch, merge.dsch,
-│   prototype.dsch
+├── 0.dsch, 1.dsch, 2.dsch,     # .dsch inputs on the current `@`-based grammar
+│   3.dsch, test.dsch,
+│   merge.dsch, timing.dsch    # timing.dsch — regression fixture for the stacked-sequence timing fix
+├── prototype.dsch              # predates this revision's grammar — see Known issues
 └── src/
     ├── main.rs                # Entry point: CLI → parse → compose → schedule → MIDI
     ├── lib.rs                 # Library crate root — re-exports compiler modules
@@ -71,11 +72,12 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 
 > **Note:** `d<n>` duration forms are atomic in the grammar — no whitespace is allowed between `d` and the number. `d4` parses as a duration scalar; `d 4` would parse `d` as an identifier.
 
+Pitch classes are bare numbers with no prefix (`0 3 7 10`) — the `pc` prefix keyword has been **removed from the grammar** this revision. It worked in the composer prior to this revision's rewrite, but was left as a `todo!()` stub when `composer.rs` was rewritten from scratch (see below); rather than re-implementing it, it's been dropped from the grammar and every fixture now expresses pitch classes as plain numbers instead.
+
 **Prefix:**
 
 | Token | Meaning |
 |-------|---------|
-| `pc` | Pitch class — bind the following value(s) as pitch classes |
 | `@` | Register (octave) — **changed this revision**, was the word `reg` |
 | `d` | Duration prefix (planned — not yet dispatched in the composer) |
 
@@ -104,31 +106,38 @@ Programs are nested expressions that specify duration, tempo, pitch, register, d
 
 **Comments:** `-- comment text` runs to end of line. Comments are enabled this revision (`COMMENT` was previously commented out in the grammar).
 
-### Example (new `@` / `#` syntax, from `1.dsch`)
+### Example (from `1.dsch`)
 
 ```
 -- WORDS --
 Strings: #48
-Violin: #40
+Violin I: #40
 Cello: #42
 C#: 1 D: 2 E: 4 F#: 6 G: 7 A: 9 B: 11
 Piano: #0
+Marimba: #13
 ost: (d4 @3 D @2 A B F# G D G A )
+ost8ve: (d4 @2 D @1 A B F# G D G A )
 ln1: (d4 @5 F# E D C# @4 B A B @5 C#)
 
 -- COMPOSITION --
 50 bpm
 
-mf ost
+Marimba
 
 {
-  mf
-  ost
-  ln1
+  ppp ost
+  ppp ost8ve
+}
+
+{
+  ppp ost
+  ppp ost8ve
+  pp ln1
 }
 ```
 
-This binds named voices (`ost`, `ln1`, …) built from duration + register + pitch-class tokens, then layers them into `{...}` stacks — a chorale-style texture growing one voice at a time. Note this file uses bindings (`ident: exp`) as short, single-letter-style pitch names (`C#: 1`) rather than defining a scale DSL; `C#` here is just an identifier bound to the pitch class `1`.
+This binds named voices (`ost`, `ost8ve`, `ln1`, …) built from duration + register + pitch-class tokens, then layers them into `{...}` stacks — a chorale-style texture growing one voice at a time, doubled an octave down by `ost8ve`. Note this file uses bindings (`ident: exp`) as short, single-letter-style pitch names (`C#: 1`) rather than defining a scale DSL; `C#` here is just an identifier bound to the pitch class `1`. A bare `Marimba` (a `Prog` binding) sets the instrument for everything that follows.
 
 ## Compiler pipeline
 
@@ -174,13 +183,14 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 
 | Composer path | Status |
 |---|---|
-| Bare pitch-class numbers (`0 3 7 10`), tempo (`bpm`), tuplet/rational/absolute durations, dynamics, program change (`#n`), register scalar (`@n`), declarations/bindings | Working |
-| `pc` prefix (any argument form) | `todo!()` — unimplemented this revision |
-| `reg`/`@` prefix with a compound argument (e.g. `@ (4 5)`) | `todo!()` |
+| Bare pitch-class numbers (`0 3 7 10`), tempo (`bpm`), tuplet/rational/absolute durations, dynamics, program change (`#n`), register scalar (`@n`), declarations/bindings | Working — exercised by every current fixture |
+| `@` (register) prefix with a compound argument (e.g. `@ (4 5)`) | `todo!()` |
 | `compose_infix` (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | `todo!()` |
 | `compose_suffix` (`^`, `bpm`, `Hz` as bare suffixes) | `todo!()` |
 | Fixed durations (`5'`, `5'2"`) | `todo!()` |
 | Relative numbers (`+n`, `-n`) | `todo!()` |
+
+`compose_pc`/`Prefix::Pc` in `ast.rs` are now unreachable dead code — the grammar no longer produces a `pc` token (see above), so nothing constructs `Prefix::Pc` any more.
 
 ### Codegen types
 
@@ -190,7 +200,7 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 
 `State` owns the context arena (`parents`, `children`, `scopes`, and parallel per-field vectors for `pcs`/`lengths`/`velocities`/`registers`/`tempos`/`programs`, plus per-context `bindings`) and now also the `timeline: Vec<(u64, Ctx)>` and `playhead: Length` used by the merge pass. Fields are appended (not overwritten) as the composer walks the tree — `add_pc`, `add_length`, etc. — with `pad`/`cycle_fill`/`resize` helpers to align differently-sized parallel arrays before merging.
 
-`State::sequence(ctx)` recurses down `Scope::Sequence` nodes and, on reaching a `Scope::Stack` node whose children are `Scope::Sequence`, calls `combine_sequences` on that set of children. `combine_sequences` cycle-fills each sequence to a common total length, then walks all of them in lock-step by their per-event lengths (a manual playhead loop, replacing the old GCD-stepped loop), allocating a fresh `Scope::Stack` child per playhead tick and appending a `(tick, ctx)` pair to `state.timeline()` for each one.
+`State::sequence(ctx)` recurses down `Scope::Sequence` nodes and, on reaching a `Scope::Stack` node whose children are `Scope::Sequence`, calls `combine_sequences` on that set of children. `combine_sequences` cycle-fills each sequence to a common total length, then walks all of them in lock-step, allocating a fresh `Scope::Stack` child each time any input sequence has an event due and appending a `(tick, ctx)` pair to `state.timeline()` for it. The playhead itself now advances by a fixed `step` (the GCD of all the input sequences' event lengths) once per outer-loop iteration, rather than by the length of whatever was last merged — this was the fix for the timing bug where stacked sequences of differing lengths picked up an extra gap between events. Once a `Scope::Sequence` node has been folded into the timeline this way, `sequence` also prunes its arena entry (`bindings`/`tempos`/`velocities`/`lengths`/`pcs`/`registers`/`programs`/`children`) and unlinks it from its parent's children list, so the tree doesn't accumulate now-redundant intermediate nodes.
 
 ### Scheduler — rewritten this revision
 
@@ -198,24 +208,23 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 
 ## Known issues
 
-- **Timing bug in scheduled output.** `1.dsch` — the current smoke test, using the new `@`/`#` syntax — composes and schedules to a `.mid` file successfully, but the author is still tracking down a timing discrepancy in the result. Likely areas: the `delta_ticks`/`forward` bookkeeping in `schedule()` ([scheduler.rs](src/compiler/scheduler.rs)) that steps the clock between `state.timeline()` entries, or the playhead loop in `State::combine_sequences` ([state.rs](src/compiler/codegen/state.rs)) that decides where each merged Stack node lands on the timeline.
-- **The debug graph visualizer is fragile and shouldn't be relied on.** `codegen/state.rs:718` calls `graph(self, self.parent(ctx))` **unconditionally** inside the `combine_sequences` merge loop — every other call site for `graph`/`print_state` in the codebase is commented out, but this one is live. `graph()` sizes its ASCII layout off `crossterm::terminal::size()` and feeds it through `rust-sugiyama`; in a non-interactive or narrow-terminal environment (piped output, CI, some sandboxes) this reliably panics — I hit `WouldBlock` from `size()`, a `rust-sugiyama` cyclic-graph assertion, and a `column_width` integer underflow/capacity overflow across different runs and build profiles here, none of which reproduced for the author running interactively. Since it's wired into the merge hot path rather than gated behind a flag, anyone running `.dsch` files non-interactively (CI, scripts, narrow terminals) should expect it to crash. Worth removing or feature-gating.
-- **`test.dsch`, `merge.dsch`, `3.dsch`** (older `reg <n> pc (...)` syntax) stack-overflow. `reg` is no longer a grammar keyword — the `reg` prefix token now requires `@` — so bare `reg` text falls through to the generic `ident` rule and composes as an unbound, silently-swallowed identifier, while `pc` still parses as `Prefix::Pc`, which is `todo!()` (see composer table above). These files need to be ported to `@`-syntax and rewritten to avoid `pc` prefix usage, or `pc` needs an implementation, before they're useful smoke tests again.
-- **`prototype.dsch`** no longer parses at all — it predates this revision's grammar (still uses the old `reg` keyword and `5'` fixed-duration usage in a position the current grammar doesn't accept at top level). It documents the target long-term DSL shape but is not currently runnable.
+- **The debug graph visualizer is fragile and shouldn't be relied on.** `codegen/state.rs` calls `graph(self, Ctx::Root)` **unconditionally**, twice per invocation of the `combine_sequences` merge loop — every other call site for `graph`/`print_state` in the codebase is commented out, but these are live. `graph()` sizes its ASCII layout off `crossterm::terminal::size()` and feeds it through `rust-sugiyama`; in a non-interactive or narrow-terminal environment (piped output, CI, some sandboxes) this can panic — I hit `WouldBlock` from `size()`, a `rust-sugiyama` cyclic-graph assertion, and a `column_width` integer underflow/capacity overflow across different runs here, none of which reproduce when running interactively in a normal terminal. Since it's wired into the merge hot path rather than gated behind a flag, running `.dsch` files non-interactively (CI, scripts, some terminal emulators) is at risk of hitting this. Worth removing or feature-gating rather than relying on terminal geometry.
+- **`prototype.dsch`** doesn't parse. `scalar = { dynamic | frequency | tempo | pure | duration | rest | prog }` tries `pure` (a bare number) before `duration` (which is where `fixed`/minutes-seconds durations live), so on input like `5'` the parser commits to reading `5` as a plain number via `pure` and never backtracks to try `fixed` — the trailing `'` then has nowhere to go and the whole parse fails at that point. `5'`/`2"` fixed durations are effectively unreachable in the current grammar whenever they start with digits, independent of the file's other issue (it also still uses the pre-`@` `reg` keyword further in, and `composed_fixed_duration` in the composer is `todo!()` regardless). It documents the target long-term DSL shape but is not currently runnable.
+- **`@` (register) prefix with a compound argument** (e.g. `@ (4 5)`, cycling the register per note) is still `todo!()` in the composer — every current fixture only uses `@n` with a single scalar register.
 - `src/track.rs` (`Seq<T>` layer builder) is not referenced from `lib.rs`/`mod.rs` and appears to be disconnected scaffolding.
-- `num-rational` is listed as a dependency but is unused — the new `Rational` duration form (`d<a>/<b>`) is computed directly as `f64` in `compose_fractional_duration` rather than through the crate.
+- `num-rational` is listed as a dependency but is unused — the `Rational` duration form (`d<a>/<b>`) is computed directly as `f64` in `compose_fractional_duration` rather than through the crate.
 
 ## Implementation status
 
 | Stage | Status |
 |-------|--------|
-| Parser (grammar + AST) | Complete for the syntax exercised in `0.dsch`/`1.dsch`/`2.dsch`; `prototype.dsch`'s older syntax no longer parses |
-| Composer — bare pitch classes, tuplet/rational/absolute durations, tempo, program change, `@` register, bindings | Working |
-| Composer — `pc` prefix | Not implemented (`todo!()`) |
+| Parser (grammar + AST) | Complete for the current `@`-based grammar; `prototype.dsch`'s older syntax no longer parses |
+| Composer — bare pitch classes, tempo, tuplet/rational/absolute durations, dynamics, program change, `@n` register, bindings | Working |
+| Composer — `@` register with a compound argument | Not implemented (`todo!()`) |
 | Composer — infix (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | Not implemented (`todo!()`) |
 | Composer — suffix (`^`, bare `bpm`/`Hz`), fixed durations, relative numbers | Not implemented (`todo!()`) |
-| `State::sequence` polyphonic merge → timeline | Working (`1.dsch`) — the live debug `graph()` call in the merge loop is a separate reliability risk, see Known issues |
-| Scheduler → MIDI | Working (`1.dsch` produces a `.mid`), but a timing bug in the scheduled output is still being tracked down — see Known issues |
+| `State::sequence` polyphonic merge → timeline | Working, including the fix for the extra-gap timing bug in stacked sequences of differing lengths — the live debug `graph()` call in the merge loop is a separate reliability risk, see Known issues |
+| Scheduler → MIDI | Working — all checked-in fixtures compose, sequence, and schedule to a `.mid` file |
 
 ## Running
 
@@ -224,7 +233,7 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 cargo run -- --input <name>
 ```
 
-For example, `cargo run -- --input 1` parses `1.dsch`, composes it, sequences it, schedules MIDI events, and writes `1.mid`. `0.dsch`/`2.dsch`/`3.dsch` are older or in-progress fixtures — see [Known issues](#known-issues) for which composer paths they still need.
+For example, `cargo run -- --input 1` parses `1.dsch`, composes it, sequences it, schedules MIDI events, and writes `1.mid`. All of `0`/`1`/`2`/`3`/`test`/`merge`/`timing` are current fixtures on the `@`-based grammar; `prototype` is not (see [Known issues](#known-issues)).
 
 ## Built with
 
@@ -233,7 +242,7 @@ For example, `cargo run -- --input 1` parses `1.dsch`, composes it, sequences it
 - [`midly`](https://github.com/kovaxis/midly) — MIDI file I/O
 - [`clap`](https://github.com/clap-rs/clap) — CLI argument parsing (`--input <name>`)
 - [`num-rational`](https://github.com/rust-num/num-rational) — declared dependency; not currently used (see Known issues)
-- [`crossterm`](https://github.com/crossterm-rs/crossterm) — cross-platform terminal control (used for debug/progress output; see Known issues for a case where this is load-bearing for a crash)
+- [`crossterm`](https://github.com/crossterm-rs/crossterm) — cross-platform terminal control (used for debug/progress output; see Known issues — the debug graph visualizer's dependency on terminal size is a reliability risk outside a normal interactive terminal)
 - [`colonnade`](https://github.com/dfhoughton/colonnade) — aligned terminal column formatting for state inspection
 - [`colprint`](https://crates.io/crates/colprint) — coloured terminal output helpers
 - [`rust-sugiyama`](https://github.com/paddison/rust-sugiyama) — Sugiyama-style layered graph layout (context-tree visualisation)

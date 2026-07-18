@@ -1,0 +1,8 @@
+C#: 1 D: 2 E: 4 F#: 6 G: 7 A: 9 B: 11
+
+50 bpm
+mf
+{
+  (d4 @3 D @2 A B F# G D G A )
+  (d8 @4 F# D E @5 C# D F# A @4 A B G A F# D @5 D d3/16 D d16 C#)
+}

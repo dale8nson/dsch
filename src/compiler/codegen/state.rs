@@ -89,7 +89,13 @@ impl State {
             ctx
         };
 
-        eprintln!("{}APPEND CHILD {parent:?} -> {ctx:?}{}", TextStyle::IntenseBoldGreen, TextStyle::ResetColor);
+
+
+        eprintln!(
+            "{}APPEND CHILD {parent:?} -> {ctx:?}{}",
+            TextStyle::IntenseBoldGreen,
+            TextStyle::ResetColor
+        );
 
         self.set_scope(ctx, Scope::None);
         self.programs.insert(ctx, Vec::new());
@@ -286,10 +292,9 @@ impl State {
         &mut self.timeline
     }
 
-    pub fn add_timeline_event(&mut self, ctx: Ctx, length: Length) {
+    pub fn add_timeline_event(&mut self, ctx: Ctx) {
         let position = self.playhead.as_u64();
         self.timeline().push((position, ctx));
-        *self.playhead() += length;
     }
 
     pub fn playhead(&mut self) -> &mut Length {
@@ -536,9 +541,10 @@ impl State {
             "{IntenseYellow}SEQUENCE {ctx:?} {:?}{ResetColor}",
             self.scope(ctx)
         );
+        graph(self, Ctx::Root);
         // print_state(self, ctx);
         let children = self.children(ctx);
-        if children.len() > 0 {
+        // if children.len() > 0 {
             match self.scope(ctx) {
                 Scope::Sequence => {
                     if children.len() > 0 {
@@ -562,15 +568,12 @@ impl State {
                                         .collect::<Vec<Ctx>>()
                                         .iter(),
                                 );
-
+                                dbg!(&ctxs);
+                                // ctxs.iter().cloned().for_each(|ctx| self.sequence(ctx));
                                 self.combine_sequences(ctxs);
                             }
                             Scope::Stack => {
-                                // dbg!();
-                                // graph(self, ctx);
-                                // print_state(self, ctx);
-
-                                todo!()
+                                self.sequence(ctx__);
                             }
                             Scope::Set => todo!(),
                             Scope::None => todo!(),
@@ -582,12 +585,20 @@ impl State {
                 Scope::None => todo!(),
             }
 
-            // children.iter().cloned().for_each(|ctx| self.sequence(ctx));
-        } else {
-            // dbg!();
-            // print_state(self, ctx);
-            self.combine_sequences(vec![ctx]);
+        self.bindings.remove(&ctx);
+        self.tempos.remove(&ctx);
+        self.velocities.remove(&ctx);
+        self.lengths.remove(&ctx);
+        self.pcs.remove(&ctx);
+        self.registers.remove(&ctx);
+        self.programs.remove(&ctx);
+        self.children.remove(&ctx);
+        let parent = self.parents.get(&ctx).cloned().unwrap_or_default();
+        if let Some(siblings) = self.children.get_mut(&parent) {
+            *siblings = siblings.extract_if(.., |ctx_| *ctx_ == ctx).collect();
         }
+        self.ctxs.remove(&ctx);
+        graph(self, Ctx::Root);
     }
 
     pub fn min_length(&self, ctx: Ctx) -> Length {
@@ -595,7 +606,6 @@ impl State {
     }
 
     pub fn combine_sequences(&mut self, ctxs: Vec<Ctx>) {
-
         // dbg!();
         // print_state(self, ctx);
 
@@ -610,17 +620,13 @@ impl State {
             let mut len: usize = 0;
             let lengths = self.lengths(*ctx);
             let length_sum = lengths.iter().cloned().sum::<Length>();
-            let cycle = lengths.iter().cycle();
-            let mut cycle = cycle.cloned();
-            let mut length = Length::default();
-            while length < sequence_length {
-                length += cycle.next().unwrap_or_default();
-                len += 1;
-            }
-            dbg!(ctx, length_sum, length, len);
+            let len =
+                f64::floor(sequence_length.as_f64() / length_sum.as_f64()) as usize * lengths.len();
+
+            // dbg!(ctx, length_sum, len);
             self.cycle_fill(*ctx, len);
             // dbg!();
-            // print_state(self, *ctx);
+            print_state(self, *ctx);
         });
         let mut iters: Vec<(Ctx, Length, Enumerate<IntoIter<Length>>)> = ctxs
             .iter()
@@ -635,9 +641,10 @@ impl State {
             .collect();
 
         let init = self
-            .lengths(ctxs.first().cloned().unwrap_or_default())
-            .first()
+            .lengths(parent)
+            .iter()
             .cloned()
+            .reduce(|a, b| gcd(a, b))
             .unwrap_or_default();
 
         let step = ctxs.iter().cloned().fold(init, |step, ctx| {
@@ -651,31 +658,30 @@ impl State {
             )
         });
 
+        eprintln!(
+            "{}STEP: {step:?}{}",
+            TextStyle::IntenseBoldYellow,
+            TextStyle::ResetColor
+        );
+
         'seq: loop {
             let mut ctx = Ctx::None;
-
             // dbg!(&iters);
             for (ctx_, counter, iter) in &mut iters {
-                if *counter <= *self.playhead() {
-                    eprintln!(
-                        "{}{parent:?} -> {ctx_:?} T: {:?}{}",
-                        TextStyle::IntenseBoldGreen,
-                        self.playhead(),
-                        TextStyle::ResetColor
-                    );
-
+                let playhead = self.playhead().clone();
+                if *counter <= playhead {
                     let iter_len = iter.len();
                     if let Some((index, length)) = iter.next() {
                         if ctx == Ctx::None {
                             ctx = self.append_child(parent);
                             self.set_scope(ctx, Scope::Stack);
                         }
-                        eprintln!(
-                            "{}index: {index}, length: {length:?} iter.len(): {}{}",
-                            TextStyle::IntenseBoldRed,
-                            iter_len,
-                            TextStyle::ResetColor
-                        );
+                        // eprintln!(
+                        //     "{}index: {index}, length: {length:?} iter.len(): {}{}",
+                        //     TextStyle::IntenseBoldRed,
+                        //     iter_len,
+                        //     TextStyle::ResetColor
+                        // );
 
                         if let Some(register) = self.registers(*ctx_).get(index) {
                             if let Some(pc) = self.pcs(*ctx_).get(index) {
@@ -684,8 +690,13 @@ impl State {
                                     if let Some(program) = self.programs(*ctx_).get(index) {
                                         if let Some(tempo) = self.tempos(*ctx_).get(index) {
                                             eprintln!(
-                                                "{}{ctx_:?}: COUNTER: {counter:?} LENGTH: {length:?} PC: {pc:?} REG: {register:?} VEL: {velocity:?} TMP: {tempo:?}{}",
-                                                TextStyle::IntenseBoldRed,
+                                                "{}{}s: PC: {} REG: {} VEL: {} LENGTH: {}{}",
+                                                TextStyle::Cyan,
+                                                counter.as_f64() / 1_000_000 as f64,
+                                                pc.as_u8(),
+                                                register.as_i8(),
+                                                velocity.0,
+                                                length.as_usize(),
                                                 TextStyle::ResetColor
                                             );
                                             self.add_length(ctx, length);
@@ -694,7 +705,7 @@ impl State {
                                             self.add_velocity(ctx, *velocity);
                                             self.add_program(ctx, *program);
                                             self.add_tempo(ctx, *tempo);
-                                            dbg!();
+                                            // dbg!();
                                             // print_state(self, ctx);
                                             *counter += length;
                                         }
@@ -704,26 +715,21 @@ impl State {
                         }
                     }
 
-
                     // else {
                     //     break 'seq;
                     // }
                 }
-
             }
-            // dbg!();
-            if ctx == Ctx::None {
+
+            if ctx != Ctx::None {
+                self.add_timeline_event(ctx);
+            }
+            if iters.iter().cloned().all(|(_, _, iter)| iter.len() == 0) {
+                *self.playhead() += step;
                 break 'seq;
             }
-            graph(self, self.parent(ctx));
-            // print_state(self, self.parent(ctx));
-
-            // self.children(ctx).iter().cloned().for_each(|ctx| self.sequence(ctx));
-            let length = self.min_length(ctx);
-            print_state(self, ctx);
-            dbg!(length);
-            self.add_timeline_event(ctx, length);
-
+            *self.playhead() += step;
         }
+        eprintln!();
     }
 }

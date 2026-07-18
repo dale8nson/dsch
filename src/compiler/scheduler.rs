@@ -35,6 +35,7 @@ pub struct Scheduler<'a> {
     clock: Ticks,
     schedule: BTreeMap<Ticks, Vec<Instruction<'a>>>,
     visited: HashSet<Ctx>,
+    event_idx: usize
 }
 
 impl<'a> Default for Scheduler<'a> {
@@ -45,6 +46,7 @@ impl<'a> Default for Scheduler<'a> {
             clock: 0,
             schedule: BTreeMap::<Ticks, Vec<Instruction>>::new(),
             visited: HashSet::<Ctx>::new(),
+            event_idx: 0
         }
     }
 }
@@ -70,6 +72,10 @@ impl<'a> Scheduler<'a> {
         self.clock = 0;
     }
 
+    pub fn event_index(&mut self) -> &mut usize {
+        &mut self.event_idx
+    }
+
     fn add_instruction(&mut self, time: u64, instruction: Instruction<'a>) {
         let instructions = self.schedule_mut().get_mut(&time);
         if instructions.is_some() {
@@ -78,13 +84,20 @@ impl<'a> Scheduler<'a> {
             let instructions = vec![instruction];
             self.schedule_mut().insert(time, instructions);
         }
+
+        self.event_idx += 1;
+    }
+
+    pub fn tempo(&self) -> Mpb {
+        self.tempo.clone()
     }
 
     fn set_tempo(&mut self, mpb: Mpb) {
-        if mpb.0 != self.tempo.0 {
+        if mpb != self.tempo {
             let time = self.clock;
             let tempo = u24::new(mpb.0 as u32);
             self.add_instruction(time, Instruction::Meta(MetaMessage::Tempo(tempo)));
+            self.tempo = mpb;
         }
     }
 
@@ -103,6 +116,10 @@ impl<'a> Scheduler<'a> {
 
     fn schedule_mut(&mut self) -> &mut BTreeMap<Ticks, Vec<Instruction<'a>>> {
         &mut self.schedule
+    }
+
+    pub fn schedule(&self) -> BTreeMap<Ticks, Vec<Instruction<'a>>> {
+        self.schedule.clone()
     }
 }
 
@@ -138,7 +155,7 @@ pub fn schedule<'a>(mut state: State) -> Smf<'a> {
             Length::MicroSeconds(t),
             state.tempos(ctx).last().cloned().unwrap_or_default(),
         );
-        eprintln!("{IntenseGreen}T: {t} TICKS: {ticks}{ResetColor}");
+        // eprintln!("{IntenseGreen}T: {t} TICKS: {ticks}{ResetColor}");
         // dbg!(t, ticks);
 
         delta_ticks = t - ticks;
@@ -154,6 +171,28 @@ pub fn schedule<'a>(mut state: State) -> Smf<'a> {
     // dbg!(&tracks);
     // pause();
 
+    let sch = scheduler.schedule();
+    let mut iter = sch.iter();
+    iter.for_each(|(ticks, instructions)| {
+        instructions.iter().cloned().for_each(|instruction| {
+            if let Instruction::Midi(MidiMessage::NoteOn { key, vel }) = instruction {
+                eprintln!("{IntenseBoldBlue}TICKS: {ticks} KEY: {key} VEL: {vel}{ResetColor}");
+            }
+        });
+    });
+
+    let events = tracks.first().cloned().unwrap_or_default();
+    let mut time: usize = 0;
+
+    events.iter().cloned().enumerate().for_each(|(idx, e)| {
+    if let TrackEventKind::Midi { message, .. } = e.kind {
+        if let MidiMessage::NoteOn { key, vel } = message {
+            eprintln!("{IntensePurple}{idx}: T: {time} KEY: {} VEL: {}{ResetColor}", key.as_int(), vel.as_int());
+        }
+    }
+        time += e.delta.as_int() as usize;
+    });
+
     let smf = Smf { header, tracks };
     smf.to_static()
 }
@@ -163,7 +202,7 @@ fn schedule_context<'a>(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'
 
     scheduler.set_program(state.programs(ctx).last().cloned().unwrap_or_default());
     scheduler.set_tempo(state.tempos(ctx).last().cloned().unwrap_or_default());
-
+    eprintln!("{IntensePurple}ID: {}, SCOPE: {:?}{ResetColor}",ctx.to_usize(), state.scope(ctx));
     match state.scope(ctx) {
         Scope::Sequence => {
             let start = scheduler.ticks();
@@ -177,6 +216,8 @@ fn schedule_context<'a>(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'
                 .zip(state.tempos(ctx).iter().cloned())
                 .zip(state.programs(ctx).iter().cloned())
                 .for_each(|(((((pc, length), velocity), register), tempo), program)| {
+                    let time = scheduler.ticks().clone();
+                    eprintln!("{IntenseBlue}T: {time} PC: {}, REG: {}, VEL: {}{ResetColor}", pc.as_u8(), register.as_i8(), velocity.0);
                     scheduler.set_program(program);
                     scheduler.set_tempo(tempo);
                     schedule_note(
@@ -184,7 +225,8 @@ fn schedule_context<'a>(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'
                         vec![pc],
                         vec![register],
                         vec![velocity],
-                        vec![length_to_beats(length, tempo)],
+                        vec![length],
+                        vec![tempo]
                     );
                     // scheduler.forward(length_to_ticks(
                     //     state
@@ -207,13 +249,8 @@ fn schedule_context<'a>(ctx: Ctx, state: &mut State, scheduler: &mut Scheduler<'
                 state.pcs(ctx),
                 state.registers(ctx),
                 state.velocities(ctx),
-                state
-                    .lengths(ctx)
-                    .iter()
-                    .cloned()
-                    .zip(tempos.iter().cloned())
-                    .map(|(length, tempo)| length_to_beats(length, tempo))
-                    .collect(),
+                state.lengths(ctx),
+                state.tempos(ctx)
             );
         }
         _ => {
@@ -295,34 +332,46 @@ fn schedule_note(
     pcs: Vec<Pc>,
     registers: Vec<Register>,
     velocities: Vec<Velocity>,
-    beats: Vec<f64>,
+    lengths: Vec<Length>,
+    tempos: Vec<Mpb>
 ) {
+
+    let beats: Vec<f64> = lengths
+    .iter()
+    .cloned()
+    .zip(tempos.iter().cloned())
+    .map(|(length, tempo)| length_to_beats(length, tempo))
+    .collect();
+
     for (((pc, beat), velocity), register) in pcs
         .into_iter()
         .zip(beats.into_iter())
         .zip(velocities.into_iter().cycle())
         .zip(registers.into_iter().cycle())
     {
-        let key = u7::new(((register + 1) as u8 * 12 + pc.to_u8()));
+        let key = u7::new(((register + 1) as u8 * 12 + pc.as_u8()));
         let vel = if matches!(pc, Pc::None) {
             u7::new(0)
         } else {
             u7::new(velocity.0)
         };
-        let time = scheduler.clock;
+        let time = scheduler.ticks();
 
         scheduler.add_instruction(time, Instruction::Midi(MidiMessage::NoteOn { key, vel }));
-        // dbg!(beats);
-        let stop = time + f64::round(beat * PPQ.as_int() as f64) as u64;
 
-        // dbg!(&stop);
-
-        // pause();
+        let length = f64::round(beat * PPQ.as_int() as f64) as u64;
+        let stop = time + length;
+        let idx = scheduler.event_index().clone();
+        eprintln!("{IntenseRed}{idx}: TIME: {time} KEY: {key} VEL: {vel} LEN: {length}{ResetColor}");
 
         scheduler.add_instruction(
             stop,
             Instruction::Midi(MidiMessage::NoteOn { key, vel: 0.into() }),
         );
+
+        let idx = scheduler.event_index().clone();
+        let time = scheduler.ticks();
+        eprintln!("{IntenseRed}{idx}: TIME: {stop} KEY: {key} VEL: 0{ResetColor}");
     }
 }
 

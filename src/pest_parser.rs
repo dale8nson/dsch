@@ -302,7 +302,6 @@ fn parse_prefix(mut rules: Rules) -> Result<Prefix> {
     // pause();
     Ok(match rule {
         Rule::dur => Prefix::Dur,
-        Rule::pc => Prefix::Pc,
         Rule::reg => Prefix::Reg,
         _ => unreachable!(),
     })

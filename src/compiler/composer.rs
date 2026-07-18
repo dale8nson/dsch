@@ -33,9 +33,8 @@ pub fn compose_program(mut program: Program) -> State {
     let mut state = State::default();
     program.exps.push(Exp::EOI);
     let ctx = Ctx::Root;
-    state.set_exps(vec![Exp::Compound(Compound::Parens(program.exps))], 0);
 
-    // print_state(&state, Ctx::Root);
+    state.set_exps(vec![Exp::Compound(Compound::Parens(program.exps))], 0);
 
     let mut m = Monad::ret((state.next().unwrap_or_default(), Ctx::Root));
     let mut should_break = false;
@@ -55,18 +54,17 @@ pub fn compose_program(mut program: Program) -> State {
     m = m
         .bind(Box::new(|(exp, ctx)| compose_exp(exp, ctx, &mut state)))
         .bind(Box::new(|(_, _)| {
-            // if state.children(ctx).is_empty() {
-            //     let length = state.lengths(ctx).iter().cloned().sum();
-            //     // state.add_timeline_event(ctx, length);
-            // }
             Monad::ret((Exp::Noop, ctx))
         }));
 
-
-
     state.sequence(ctx);
-    // graph(&mut state, ctx);
-    // dbg!(state.timeline());
+
+    state.children(ctx).iter().cloned().for_each(|ctx| print_state(&state, ctx));
+
+    state.timeline().clone().iter().cloned().enumerate().for_each(|(idx, (t, ctx))| {
+        let lengths = state.lengths(ctx).iter().cloned().map(|length| format!("{}", length.as_u64())).collect::<Vec<String>>().join(", ");
+        eprintln!("{IntenseYellow}{idx}: T:{t} ID:{} DUR: {lengths}{ResetColor}", ctx.to_usize());
+    });
 
     state
 }
@@ -87,7 +85,7 @@ fn compose_exp(exp: Exp, ctx: Ctx, state: &mut State) -> Monad<(Exp, Ctx)> {
 }
 
 fn compose_compound(compound: Compound, ctx: Ctx, state: &mut State) -> Monad<(Exp, Ctx)> {
-    // dbg!(ctx);
+    dbg!(ctx);
     let ctx_ = state.append_child(ctx);
     state.set_scope(ctx_, compound.scope());
 
@@ -314,9 +312,9 @@ fn compose_fractional_duration(
                     * QUARTER_NOTE_RATIO
                     * state.tempos(ctx).last().cloned().unwrap_or_default().0 as f64,
             ) as u64;
-            dbg!(microseconds);
+            // dbg!(microseconds);
             state.add_length(ctx, Length::MicroSeconds(microseconds));
-            print_state(state, ctx);
+            // print_state(state, ctx);
             Monad::ret((state.next().unwrap_or_default(), ctx))
         }
     }

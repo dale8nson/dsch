@@ -297,9 +297,32 @@ pub fn out(col: u16, row: u16, s: String) {
 }
 
 pub fn print_state(state: &State, ctx: Ctx) {
+    let mut text = state_str(state, ctx);
+
+    let len = state.exps().len() - state.len();
+
+    // state.exps().iter().skip(len).for_each(|exp| {
+    //     text += format!(
+    //         "{}{exp}{}",
+    //         TextStyle::Cyan,
+    //         TextStyle::ResetColor
+    //     )
+    //     .as_str();
+    // });
+
+    let mut lines: Vec<String> = text.split("\n").map(str::to_string).collect();
+    let (col, row) = (25, 5);
+
+    lines.into_iter().for_each(|line| {
+        eprintln!("{}{line}{}", TextStyle::Cyan, TextStyle::ResetColor);
+    });
+    eprint!("\n");
+}
+
+fn state_str(state: &State, ctx: Ctx) -> String {
     let parent = state.parent(ctx);
     let mut text = format!(
-        "\x1b[1;36m{:?} {:?} -> {:?} {:?}\x1b[0m\n\x1b[0;36m\nProg: {:?}\nPCs : {:?}\nVel : {:?}\nReg : {:?}\nLens: {:?}\nTmps: {:?}\nChil: {:?}\x1b[0m\n",
+        "{:?} {:?} -> {:?} {:?}\nProg: {:?}\nPCs : {:?}\nVel : {:?}\nReg : {:?}\nLens: {:?}\nTmps: {:?}\nChil: {:?}\n",
         parent,
         state.scope(parent),
         ctx,
@@ -313,25 +336,7 @@ pub fn print_state(state: &State, ctx: Ctx) {
         // state.bindings(ctx),
         state.children(ctx),
     );
-
-    let len = state.exps().len() - state.len();
-
-    state.exps().iter().skip(len).for_each(|exp| {
-        text += format!(
-            "{}{exp}{}\n",
-            TextStyle::IntenseYellow,
-            TextStyle::ResetColor
-        )
-        .as_str();
-    });
-
-    let mut lines: Vec<String> = text.split("\n").map(str::to_string).collect();
-    let (col, row) = (25, 5);
-
-    lines.into_iter().for_each(|line| {
-        eprintln!("{line}");
-    });
-    eprint!("\n");
+    text
 }
 
 fn to_edges(ctx: Ctx, state: &State) -> Vec<(u32, u32)> {

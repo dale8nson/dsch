@@ -278,21 +278,27 @@ impl From<Data> for Pc {
 }
 
 impl Pc {
-    pub fn to_u8(self) -> u8 {
-        match self {
+    pub fn as_u8(&self) -> u8 {
+        match *self {
             Pc::Class(int) => int,
             Pc::None => 0,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, Hash)]
 /// Microseconds per beat
 pub struct Mpb(pub u64);
 
 impl Default for Mpb {
     fn default() -> Self {
         Mpb(f64::round(60_000_000 as f64 / 120 as f64) as u64)
+    }
+}
+
+impl PartialEq for Mpb {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 }
 
@@ -378,6 +384,15 @@ impl BuildHasher for Register {
     fn build_hasher(&self) -> Self::Hasher {
         let s = std::hash::RandomState::new();
         s.build_hasher()
+    }
+}
+
+impl Register {
+    pub fn as_i8(&self) -> i8 {
+        match *self {
+            Register::Reg(n) => n,
+            Register::None => 4
+        }
     }
 }
 
