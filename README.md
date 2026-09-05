@@ -2,7 +2,7 @@
 
 A compiler for a structured music composition DSL — parses `.dsch` source and lowers it to MIDI.
 
-> **Status: Work in progress / research.** Active development — architecture and API subject to change. The composer and scheduler were rewritten from scratch in this revision; all checked-in `.dsch` fixtures now compile and schedule to MIDI, including the timing fix for stacked sequences of differing lengths. See [Known issues](#known-issues) for what's still incomplete.
+> **Status: Work in progress / research.** Active development — architecture and API subject to change. The composer and scheduler were rewritten from scratch in this revision; most checked-in `.dsch` fixtures compile and schedule to MIDI, including the timing fix for stacked sequences of differing lengths. Expressions built on relative numbers (`+n`, `-n`) still don't compile (`compose_relative` is `todo!()`), and listening back to the more complex pieces has turned up rhythmic discrepancies the GCD-step fix doesn't fully account for — see [Known issues](#known-issues) for what's still incomplete.
 
 ## Overview
 
@@ -208,6 +208,7 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 
 ## Known issues
 
+- **Rhythmic discrepancies in more complex pieces.** The `combine_sequences` GCD-step fix (see below) resolves the extra-gap bug for the simple stacked-sequence cases it targeted, but listening back to more elaborate pieces — deeper nesting, more voices, mixed sequence/stack shapes — has turned up timing that doesn't sound right. Root cause not yet isolated; likely another edge case in the merge/cycle-fill logic rather than a fault in the scheduler itself, since the scheduler just walks whatever timeline `State::sequence` hands it.
 - **The debug graph visualizer is fragile and shouldn't be relied on.** `codegen/state.rs` calls `graph(self, Ctx::Root)` **unconditionally**, twice per invocation of the `combine_sequences` merge loop — every other call site for `graph`/`print_state` in the codebase is commented out, but these are live. `graph()` sizes its ASCII layout off `crossterm::terminal::size()` and feeds it through `rust-sugiyama`; in a non-interactive or narrow-terminal environment (piped output, CI, some sandboxes) this can panic — I hit `WouldBlock` from `size()`, a `rust-sugiyama` cyclic-graph assertion, and a `column_width` integer underflow/capacity overflow across different runs here, none of which reproduce when running interactively in a normal terminal. Since it's wired into the merge hot path rather than gated behind a flag, running `.dsch` files non-interactively (CI, scripts, some terminal emulators) is at risk of hitting this. Worth removing or feature-gating rather than relying on terminal geometry.
 - **`prototype.dsch`** doesn't parse. `scalar = { dynamic | frequency | tempo | pure | duration | rest | prog }` tries `pure` (a bare number) before `duration` (which is where `fixed`/minutes-seconds durations live), so on input like `5'` the parser commits to reading `5` as a plain number via `pure` and never backtracks to try `fixed` — the trailing `'` then has nowhere to go and the whole parse fails at that point. `5'`/`2"` fixed durations are effectively unreachable in the current grammar whenever they start with digits, independent of the file's other issue (it also still uses the pre-`@` `reg` keyword further in, and `composed_fixed_duration` in the composer is `todo!()` regardless). It documents the target long-term DSL shape but is not currently runnable.
 - **`@` (register) prefix with a compound argument** (e.g. `@ (4 5)`, cycling the register per note) is still `todo!()` in the composer — every current fixture only uses `@n` with a single scalar register.
@@ -223,8 +224,8 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 | Composer — `@` register with a compound argument | Not implemented (`todo!()`) |
 | Composer — infix (`:`, `><`, `..`, `<`, `>`, `+`, `-`, `*`, `/`) | Not implemented (`todo!()`) |
 | Composer — suffix (`^`, bare `bpm`/`Hz`), fixed durations, relative numbers | Not implemented (`todo!()`) |
-| `State::sequence` polyphonic merge → timeline | Working, including the fix for the extra-gap timing bug in stacked sequences of differing lengths — the live debug `graph()` call in the merge loop is a separate reliability risk, see Known issues |
-| Scheduler → MIDI | Working — all checked-in fixtures compose, sequence, and schedule to a `.mid` file |
+| `State::sequence` polyphonic merge → timeline | Working for the simple cases the GCD-step fix targeted; rhythmic discrepancies remain in more complex pieces (deeper nesting, more voices, mixed sequence/stack shapes) — see Known issues. The live debug `graph()` call in the merge loop is a separate reliability risk, also see Known issues |
+| Scheduler → MIDI | Working — most checked-in fixtures compose, sequence, and schedule to a `.mid` file, modulo the rhythmic discrepancies above |
 
 ## Running
 
