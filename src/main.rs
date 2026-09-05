@@ -26,13 +26,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let src = std::fs::read_to_string(format!("{}.dsch", args.input))?;
-    // dbg!(&src);
     let pairs = CLParser::parse(Rule::program, &src)?.next().unwrap();
-    // dbg!(&pairs);
     let ast = parse_program(pairs)?;
-    // println!("{ast:#?}");
-    // let composition = Composer::new(State::default()).compose_program(ast);
-    //
     let state = compose_program(ast);
     let smf = schedule(state);
     let _ = smf.save(format!("{}.mid", args.input));

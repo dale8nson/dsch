@@ -45,6 +45,7 @@ fn parse_exp(mut rules: Rules) -> Result<Exp> {
     Ok(match rule {
         Rule::simple => Exp::Simple(parse_simple(inner)?),
         Rule::compound => Exp::Compound(parse_compound(inner)?),
+        Rule::decl => Exp::Decl(parse_decl(inner)?),
         _ => unreachable!(),
     })
 }
@@ -61,7 +62,6 @@ fn parse_simple(mut rules: Rules) -> Result<Simple> {
         Rule::prefix => Ok(Simple::Prefix(parse_prefix(inner)?)),
         Rule::infix => Ok(Simple::Infix(parse_infix(inner)?)),
         Rule::suffix => Ok(Simple::Suffix(parse_suffix(inner)?)),
-        Rule::decl => Ok(Simple::Decl(parse_decl(inner)?)),
         Rule::ident => Ok(Simple::Ident(parse_ident(next)?)),
         _ => unreachable!(),
     }
@@ -73,8 +73,8 @@ fn parse_scalar(mut rules: Rules) -> Result<Scalar> {
     // dbg!(&rule);
     let mut inner = next.clone().into_inner();
     match rule {
-        Rule::duration => Ok(Scalar::Duration(parse_duration(inner)?)),
-        Rule::dynamic => Ok(Scalar::Dynamic(parse_dynamic(inner)?)),
+        // Rule::duration => Ok(Scalar::Duration(parse_duration(inner)?)),
+        Rule::dynamic => Ok(Scalar::Dynamic(Dynamic(parse_dynamic(inner)?))),
         Rule::frequency => Ok(Scalar::Frequency(parse_frequency(inner)?)),
         Rule::pure => Ok(Scalar::Pure(parse_pure(inner)?)),
         Rule::rest => Ok(Scalar::Rest),
@@ -89,40 +89,40 @@ fn parse_dynamic(mut rules: Rules) -> Result<String> {
     Ok(String::from(rules.next().unwrap().as_span().as_str()))
 }
 
-fn parse_duration(mut rules: Rules) -> Result<Duration> {
-    let next = rules.next().unwrap();
-    let rule = next.as_rule();
-    let inner = next.into_inner();
-    match rule {
-        Rule::fixed => Ok(Duration::Fixed(parse_fixed(inner)?)),
-        Rule::fractional => Ok(Duration::Fractional(parse_fractional(inner)?)),
-        _ => unreachable!(),
-    }
-}
+// fn parse_duration(mut rules: Rules) -> Result<Duration> {
+//     let next = rules.next().unwrap();
+//     let rule = next.as_rule();
+//     let inner = next.into_inner();
+//     match rule {
+//         Rule::fixed => Ok(Duration::Fixed(parse_fixed(inner)?)),
+//         Rule::fractional => Ok(Duration::Fractional(parse_fractional(inner)?)),
+//         _ => unreachable!(),
+//     }
+// }
 
-fn parse_fixed(mut rules: Rules) -> Result<Fixed> {
-    let next = rules.next().unwrap();
-    let rule = next.as_rule();
-    let inner = next.into_inner();
-    match rule {
-        Rule::seconds => Ok(Fixed {
-            minutes: Absolute::UInt(0),
-            seconds: parse_seconds(inner)?,
-        }),
-        Rule::minutes => {
-            let secs = if let Some(secs) = rules.next() {
-                parse_seconds(secs.into_inner())?
-            } else {
-                Absolute::UInt(0)
-            };
-            Ok(Fixed {
-                minutes: parse_minutes(inner)?,
-                seconds: secs,
-            })
-        }
-        _ => unreachable!(),
-    }
-}
+// fn parse_fixed(mut rules: Rules) -> Result<Fixed> {
+//     let next = rules.next().unwrap();
+//     let rule = next.as_rule();
+//     let inner = next.into_inner();
+//     match rule {
+//         Rule::seconds => Ok(Fixed {
+//             minutes: Absolute::UInt(0),
+//             seconds: parse_seconds(inner)?,
+//         }),
+//         Rule::minutes => {
+//             let secs = if let Some(secs) = rules.next() {
+//                 parse_seconds(secs.into_inner())?
+//             } else {
+//                 Absolute::UInt(0)
+//             };
+//             Ok(Fixed {
+//                 minutes: parse_minutes(inner)?,
+//                 seconds: secs,
+//             })
+//         }
+//         _ => unreachable!(),
+//     }
+// }
 
 fn parse_minutes(mut rules: Rules) -> Result<Absolute> {
     let next = rules.next().unwrap();
@@ -146,7 +146,7 @@ fn parse_fractional(mut rules: Rules) -> Result<Fractional> {
     let inner = next.into_inner();
     match rule {
         Rule::absolute => Ok(Fractional::Absolute(parse_absolute(inner)?)),
-        Rule::tuplet => Ok(Fractional::Tuplet(parse_tuplet(inner)?)),
+        // Rule::tuplet => Ok(Fractional::Tuplet(parse_tuplet(inner)?)),
         Rule::rational => Ok(Fractional::Rational(parse_rational(inner)?)),
         _ => unreachable!(),
     }
@@ -187,7 +187,18 @@ fn parse_infix(mut rules: Rules) -> Result<Infix> {
         Rule::minus => Ok(Infix::Minus),
         Rule::mul => Ok(Infix::Mul),
         Rule::div => Ok(Infix::Div),
+        Rule::interpolation => Ok(Infix::Interpolation(parse_interpolation(inner)?)),
         _ => unreachable!(),
+    }
+}
+
+fn parse_interpolation(mut rules: Pairs<'_, Rule>) -> Result<Interpolation> {
+    let next = rules.next().unwrap();
+    let rule = next.as_rule();
+    match rule {
+        Rule::increase => Ok(Interpolation::Increase),
+        Rule::decrease => Ok(Interpolation::Decrease),
+        _ => unreachable!()
     }
 }
 
@@ -196,6 +207,7 @@ fn parse_pure(mut rules: Rules) -> Result<Pure> {
     let rule = next.as_rule();
     let inner = next.into_inner();
     match rule {
+        Rule::rational => Ok(Pure::Rational(parse_rational(inner)?)),
         Rule::relative => Ok(Pure::Relative(parse_relative(inner)?)),
         Rule::absolute => Ok(Pure::Absolute(parse_absolute(inner)?)),
         _ => unreachable!(),
@@ -203,25 +215,32 @@ fn parse_pure(mut rules: Rules) -> Result<Pure> {
 }
 
 fn parse_relative(mut rules: Rules) -> Result<Relative> {
-    let sgn = rules.next().unwrap().as_rule();
-    let next = rules.next().unwrap();
-    let abs = next.as_rule();
+    let sgn = rules.next().unwrap().into_inner().next().unwrap().as_rule();
+    let mut next = rules.next().unwrap();
+    // dbg!(&next);
+    let inner = next.into_inner().next().unwrap();
+    let abs = inner.as_rule();
+    // dbg!(abs);
+
 
     let sgn = match sgn {
         Rule::plus => Sign::Plus,
         Rule::minus => Sign::Minus,
-        _ => unreachable!(),
+        _ => {dbg!(sgn); todo!()},
     };
     match abs {
         Rule::integer => Ok(Relative {
             sign: sgn,
-            val: Absolute::UInt(parse_integer(next)?),
+            val: Absolute::UInt(parse_integer(inner)?),
         }),
         Rule::float => Ok(Relative {
             sign: sgn,
-            val: Absolute::Float(parse_float(next)?),
+            val: Absolute::Float(parse_float(inner)?),
         }),
-        _ => unreachable!(),
+        _ => {
+            dbg!(abs);
+            unreachable!()
+        },
     }
 }
 
@@ -257,19 +276,43 @@ fn parse_compound(mut rules: Rules) -> Result<Compound> {
             inner.next().unwrap().into_inner(),
         )?)),
         Rule::ratio => Ok(Compound::Ratio(parse_ratio(inner)?)),
-        Rule::decl => Ok(Compound::Decl(Box::new(parse_decl(inner)?))),
+        // Rule::decl => Ok(Compound::Decl(Box::new(parse_decl(inner)?))),
 
         _ => unreachable!(),
     }
 }
 
 fn parse_decl(mut rules: Rules) -> Result<Decl> {
-    let ident = rules.next().unwrap().as_str();
-    let exp = rules.next().unwrap().into_inner();
-    Ok(Decl {
-        ident: Ident(ident.to_string()),
-        binding: Box::new(parse_exp(exp)?),
-    })
+    let next = rules.next().unwrap();
+    let rule = next.as_rule();
+    let inner = next.into_inner();
+
+    match rule {
+        Rule::expdecl => Ok(Decl::ExpDecl(parse_expdecl(inner)?)),
+        Rule::importdecl => Ok(Decl::ImportDecl(parse_importdecl(inner)?)),
+        Rule::funcdecl => Ok(Decl::FuncDecl(parse_funcdecl(inner)?)),
+        _ => todo!()
+    }
+
+}
+
+fn parse_funcdecl(mut rules: Rules) -> Result<FuncDecl> {
+    let ident = rules.next().unwrap();
+    let params = rules.next().unwrap();
+    let funcdef = rules.next().unwrap();
+
+    todo!()
+
+}
+
+fn parse_importdecl(mut rules: Rules) -> Result<ImportDecl> {
+    todo!()
+}
+
+fn parse_expdecl(mut rules: Rules) -> Result<ExpDecl> {
+     let ident = rules.next().unwrap();
+     let binding = rules.next().unwrap();
+    Ok(ExpDecl { ident: parse_ident(ident)?, binding: Box::new(parse_exp(binding.into_inner())?) })
 }
 
 fn parse_ratio(mut rules: Rules) -> Result<Vec<Absolute>> {
@@ -303,6 +346,7 @@ fn parse_prefix(mut rules: Rules) -> Result<Prefix> {
     Ok(match rule {
         Rule::dur => Prefix::Dur,
         Rule::reg => Prefix::Reg,
+        Rule::hash => Prefix::Prog,
         _ => unreachable!(),
     })
 }

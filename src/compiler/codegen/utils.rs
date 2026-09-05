@@ -1,22 +1,24 @@
 use std::{
+    array::IntoIter,
     collections::{BTreeMap, HashMap},
     fmt::Display,
     io::stderr,
-    iter::repeat_n,
+    iter::{Cloned, Cycle, from_fn, repeat_n, zip},
     ops::{Deref, Div, Mul, Rem},
+    slice::Iter,
+    sync::LazyLock,
 };
 
-use crate::compiler::{
-    ast::{utils::abs_to_f64, *},
-    codegen::{state::State, *},
+use crate::{
+    color,
+    compiler::{
+        ast::{utils::abs_to_f64, *},
+        codegen::{state::State, *},
+    },
 };
 
 use colonnade::{Alignment, Colonnade};
-use crossterm::{
-    cursor::{self, MoveToNextLine, RestorePosition, position},
-    execute,
-    terminal::{self, ClearType, size},
-};
+use crossterm::{cursor::*, execute, style::*, terminal::*};
 use rust_sugiyama::{
     configure::{Config, RankingType},
     from_edges,
@@ -149,30 +151,114 @@ impl Display for TextStyle {
     }
 }
 
-pub fn to_length(frac: Absolute, tempo: Mpb) -> MicroSeconds {
-    let fr = abs_to_f64(frac);
-    MicroSeconds(f64::round(fr / 4 as f64 * tempo.0 as f64) as u64)
+struct LineMap {
+    pub map: Option<HashMap<u32, TextStyle>>,
 }
 
-pub fn duration_to_micros(minutes: Absolute, seconds: Absolute) -> MicroSeconds {
-    MicroSeconds(f64::round(
-        match minutes {
-            Absolute::UInt(int) => (int * 60 * 1_000_000) as f64,
-            Absolute::Float(float) => float * 1_000_000 as f64,
-        } + match seconds {
-            Absolute::UInt(int) => (int * 1_000_000) as f64,
-            Absolute::Float(float) => float * 1_000_000 as f64,
-        },
-    ) as u64)
+static mut LINES: LineMap = LineMap { map: None };
+static mut COLOR: [TextStyle; 5] = [
+    TextStyle::IntensePurple,
+    TextStyle::IntenseYellow,
+    TextStyle::IntenseCyan,
+    TextStyle::IntenseGreen,
+    TextStyle::IntenseRed,
+];
+static mut COLOR_INDEX: usize = 0;
+
+pub struct ColorIter(TextStyle);
+
+impl From<ColorIter> for TextStyle {
+    fn from(value: ColorIter) -> Self {
+        value.0
+    }
 }
 
-pub fn length_to_ticks(length: Length, tempo: Mpb) -> u64 {
-    match length {
-        Length::None => 0,
-        Length::MicroSeconds(micros) => {
-            f64::round(micros as f64 / tempo.0 as f64 * PPQ.as_int() as f64) as u64
+impl ColorIter {
+    pub fn get(line: u32) -> Self {
+        unsafe {
+            if let Some(ref mut map) = LINES.map {
+                if map.contains_key(&line) {
+                    Self(map.get(&line).cloned().unwrap())
+                } else {
+                    let idx = COLOR_INDEX;
+                    let color = COLOR[idx].clone();
+                    map.insert(line, color);
+                    COLOR_INDEX = (COLOR_INDEX + 1) % 5;
+                    Self(color)
+                }
+            } else {
+                LINES.map = Some(HashMap::<u32, TextStyle>::new());
+                let idx = COLOR_INDEX;
+                let color = COLOR[idx];
+                COLOR_INDEX = (COLOR_INDEX + 1) % 5;
+                Self(color)
+            }
         }
     }
+}
+
+// impl Iterator for ColorIter {
+//     type Item = TextStyle;
+
+//     fn next(&mut self) -> Option<Self::Item> {
+//         use TextStyle::*;
+
+//         let color = unsafe { CURRENT_COLOR };
+//         unsafe {
+//             CURRENT_COLOR = match CURRENT_COLOR {
+//                 IntensePurple => IntenseYellow,
+//                 IntenseYellow => IntenseCyan,
+//                 IntenseCyan => IntenseGreen,
+//                 IntenseGreen => IntenseBoldRed,
+//                 IntenseBoldRed => IntensePurple,
+//                 _ => todo!(),
+//             };
+//         }
+
+//         Some(color)
+//     }
+// }
+#[macro_export]
+macro_rules! color (
+    () => {
+        TextStyle::from(ColorIter::get(line!()))
+    }
+
+);
+
+pub fn length_to_ticks(length: Length, tempo: Mpb) -> u64 {
+    let ticks = match length {
+        Length::None => 0,
+        Length::MicroSeconds(ratio) => (ratio / tempo.0
+            * Ratio::<u64>::from_u16(PPQ.as_int()).unwrap())
+        .to_u64()
+        .unwrap(),
+    };
+    // dbg!(ticks);
+    // pause();
+    ticks
+}
+
+pub fn compose_thunks(from: Ctx, into: Ctx, state: &mut State) {
+    info(format!(
+        "{}COMPOSE THUNKS FROM {from:?} INTO {into:?}",
+        color!()
+    ));
+    misc(format!("{:?}", state.thunks(from)));
+    // pause();
+    misc(state_str(state, into));
+    // pause();
+    if let Some(thunks) = state.thunks_mut(from) {
+        if let Some(thunks) = thunks.get_mut(&LifeCycleEvent::Composing) {
+            thunks.reverse();
+            if let Some(mut thunk) = thunks.pop() {
+                thunk.call(into, state);
+                compose_thunks(from, into, state);
+            }
+        }
+    }
+    misc(state_str(state, into));
+    // pause();
 }
 
 pub fn gcf<T: Div + Rem<Output = T> + From<u64> + PartialOrd + Ord + PartialEq + Eq + Copy>(
@@ -225,36 +311,23 @@ pub fn align(expr: impl std::fmt::Debug, indents: usize, width: usize) -> String
     string.replace('"', "")
 }
 
-pub fn gcd<
-    T: Div<Output = T> + Rem<Output = T> + Ord + PartialEq + Default + Clone + Copy + Debug,
->(
+pub fn gcd<T: Div<Output = T> + Rem<Output = T> + Ord + PartialEq + Default + Clone + Debug>(
     a: T,
     b: T,
 ) -> T {
-    let max = a.max(b);
-    let min = a.min(b);
+    let max = a.clone().max(b.clone());
+    let min = a.clone().min(b.clone());
+
+    misc(format!("{}a: {a:?} b: {b:?}", color!()));
 
     if min == T::default() {
         max
     } else {
-        gcd(min, max % min)
+        gcd(min.clone(), max % min)
     }
 }
 
-pub fn lcd<
-    T: Mul<Output = T> + Div<Output = T> + Rem<Output = T> + Ord + PartialEq + Default + Debug + Copy,
->(
-    a: T,
-    b: T,
-) -> T {
-    let g = gcd(a, b);
-    eprintln!(
-        "{}gcd: {g:?}{}",
-        TextStyle::IntensePurple,
-        TextStyle::ResetColor
-    );
-    a * b / g
-}
+// pub fn lerp<T: Div + Mul>(value: T, )
 
 pub fn progress<T: Div + Display + Copy + Into<f64> + Into<u32>>(
     dividend: T,
@@ -296,79 +369,623 @@ pub fn out(col: u16, row: u16, s: String) {
     // execute!(stderr(), terminal::Clear(ClearType::UntilNewLine));
 }
 
+#[inline(always)]
 pub fn print_state(state: &State, ctx: Ctx) {
     let mut text = state_str(state, ctx);
 
-    let len = state.exps().len() - state.len();
-
-    // state.exps().iter().skip(len).for_each(|exp| {
-    //     text += format!(
-    //         "{}{exp}{}",
-    //         TextStyle::Cyan,
-    //         TextStyle::ResetColor
-    //     )
-    //     .as_str();
-    // });
-
     let mut lines: Vec<String> = text.split("\n").map(str::to_string).collect();
-    let (col, row) = (25, 5);
 
     lines.into_iter().for_each(|line| {
-        eprintln!("{}{line}{}", TextStyle::Cyan, TextStyle::ResetColor);
+        execute!(
+            stderr(),
+            SavePosition,
+            Print(format!("{line}")),
+            RestorePosition,
+            MoveDown(1)
+        );
     });
-    eprint!("\n");
+    // eprint!("\n");
 }
 
-fn state_str(state: &State, ctx: Ctx) -> String {
+#[inline(always)]
+pub fn print_states(state: &State, ctx: Ctx) {
+    // execute!(
+    //     stderr(),
+    //     SavePosition,
+    //     MoveTo(0, 4),
+    //     Clear(ClearType::CurrentLine)
+    // );
+    eprint!("{}", color!());
+    misc(state_str(state, ctx));
+    state
+        .children(ctx)
+        .iter()
+        .cloned()
+        .for_each(|ctx| print_states(state, ctx));
+    // execute!(stderr(), Clear(ClearType::UntilNewLine), RestorePosition);
+}
+
+pub fn print_slice(ctx: Ctx, col: usize, state: &mut State) {
+    let pcs = state
+        .pcs(ctx)
+        .and_then(|ts| ts.get(col).cloned())
+        .unwrap_or_default();
+    let lengths = state
+        .lengths(ctx)
+        .and_then(|ts| ts.get(col).cloned())
+        .unwrap_or_default();
+    let velocities = state
+        .velocities(ctx)
+        .and_then(|ts| ts.get(col).cloned())
+        .unwrap_or_default();
+    let registers = state
+        .registers(ctx)
+        .and_then(|ts| ts.get(col).cloned())
+        .unwrap_or_default();
+    let tempos = state
+        .tempos(ctx)
+        .and_then(|ts| ts.get(col).cloned())
+        .unwrap_or_default();
+    let programs = state
+        .programs(ctx)
+        .and_then(|ts| ts.get(col).cloned())
+        .unwrap_or_default();
+
+    execute!(
+        stderr(),
+        SavePosition,
+        Print(format!("{ctx:?}")),
+        RestorePosition,
+        MoveDown(1),
+        SavePosition,
+        Print(format!("\t\tCOL: {col}")),
+        RestorePosition,
+        MoveDown(1)
+    );
+
+    zip(
+        pcs.into_iter(),
+        zip(
+            lengths.into_iter(),
+            zip(
+                velocities.into_iter(),
+                zip(
+                    registers.into_iter(),
+                    zip(tempos.into_iter(), programs.into_iter()),
+                ),
+            ),
+        ),
+    )
+    .enumerate()
+    .for_each(
+        |(index, (pc, (length, (velocity, (register, (tempo, program))))))| {
+            let row_str = format!("ROW {index} ");
+            execute!(
+                stderr(),
+                SavePosition,
+                // Print(row_str.clone()),
+                Print(format!("PC:  {}", pc.as_f64())),
+                RestorePosition,
+                MoveDown(1),
+                SavePosition,
+                // MoveRight(row_str.len() as u16),
+                Print(format!("LEN: {}", length.as_u64())),
+                RestorePosition,
+                MoveDown(1),
+                SavePosition,
+                // MoveRight(row_str.len() as u16),
+                Print(format!("VEL: {velocity:?}")),
+                RestorePosition,
+                MoveDown(1),
+                SavePosition,
+                // MoveRight(row_str.len() as u16),
+                Print(format!("REG: {}", register.as_i8())),
+                RestorePosition,
+                MoveDown(1),
+                SavePosition,
+                // MoveRight(row_str.len() as u16),
+                Print(format!("TMP: {}", tempo.clone().0.to_u64().unwrap())),
+                RestorePosition,
+                MoveDown(1),
+                SavePosition,
+                // MoveRight(row_str.len() as u16),
+                Print(format!("PRG: {}", program.0)),
+                RestorePosition,
+                MoveUp(5)
+            );
+        },
+    );
+}
+
+pub fn print_slices(ctx: Ctx, from: u16, to: u16, state: &mut State) {
+    let (cols, rows) = size().unwrap();
+    let col_width = cols / 10;
+
+    execute!(
+        stderr(),
+        SavePosition,
+        Clear(ClearType::FromCursorDown),
+        MoveTo(0, 24),
+        // RestorePosition,
+        // Print(row_str.clone()),
+        Print(format!("PC:  ")),
+        MoveToColumn(0),
+        MoveDown(1),
+        // MoveRight(row_str.len() as u16),
+        Print(format!("LEN: ")),
+        MoveToColumn(0),
+        MoveDown(1),
+        // MoveRight(row_str.len() as u16),
+        Print(format!("VEL: ")),
+        MoveToColumn(0),
+        MoveDown(1),
+        // MoveRight(row_str.len() as u16),
+        Print(format!("REG: ")),
+        MoveToColumn(0),
+        MoveDown(1),
+        // MoveRight(row_str.len() as u16),
+        Print(format!("TMP: ")),
+        MoveToColumn(0),
+        MoveDown(1),
+        // MoveRight(row_str.len() as u16),
+        Print(format!("PRG: ")),
+        // RestorePosition,
+        // MoveUp(5),
+        // MoveRight(5)
+    );
+    let range = to - from;
+    for idx in 0..range {
+        let col = from + idx;
+        let x = (idx * col_width);
+
+        execute!(stderr(), SavePosition, MoveTo(5 + x, 24 + (idx / 10) * 6));
+        print_slice(ctx, col as usize, state);
+        // execute!(stderr(), Clear(ClearType::FromCursorDown));
+    }
+
+    execute!(stderr(), Clear(ClearType::FromCursorDown), RestorePosition);
+}
+
+pub fn print_stacks(state: &mut State) {
+    misc(format!(
+        "{}EXPS:\n{}\nSTACK:\n{}\n",
+        color!(),
+        state
+            .exps()
+            .iter()
+            .map(Exp::to_string)
+            .collect::<Vec<String>>()
+            .join(", "),
+        state
+            .stack()
+            .iter()
+            .map(Exp::to_string)
+            .collect::<Vec<String>>()
+            .join(", ")
+    ));
+}
+
+pub fn print_notes(ctx: Ctx, state: &mut State) {
+    // eprintln!("{}PRINT NOTES {ctx:?}", color!());
+    let notes = note_str(ctx, state);
+    // dbg!(&notes);
+    misc(format!("\n{}\n", notes));
+}
+
+pub fn note_str(ctx: Ctx, state: &mut State) -> String {
+    let rows = state
+        .lengths(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .max_by(|a, b| a.len().cmp(&b.len()))
+        .unwrap_or_default()
+        .len();
+    let cols = state.lengths(ctx).unwrap_or_default().len();
+    let mut lengths = state
+        .lengths(ctx)
+        .and_then(|lengths| {
+            if lengths.is_empty() {
+                None
+            } else {
+                Some(lengths)
+            }
+        })
+        .unwrap_or(vec![
+            from_fn(|| Some(state.get::<Length>(ctx)))
+                .take(cols)
+                .flatten()
+                .collect(),
+        ]);
+
+    let mut tempos: Vec<Vec<Tempo>> = state
+        .tempos(ctx)
+        .and_then(|tempos| {
+            if tempos.is_empty() {
+                None
+            } else {
+                Some(tempos)
+            }
+        })
+        .unwrap_or(vec![
+            from_fn(|| Some(state.get::<Tempo>(ctx)))
+                .take(cols)
+                .flatten()
+                .collect(),
+        ])
+        .iter()
+        .cloned()
+        .cycle()
+        .take(cols)
+        .collect();
+
+    // dbg!(rows, cols, &lengths, &tempos);
+    // dbg!(rows, cols, vec![state.get::<Length>(ctx)], vec![state.get::<Tempo>(ctx)], state.pcs(ctx).unwrap_or_default());
+    let mut lines = Vec::<Vec<String>>::new();
+    lines.resize(
+        rows,
+        repeat_n("\u{0020}\u{0020}\u{0020}".to_string(), cols).collect::<Vec<String>>(),
+    );
+
+    let mut beam = false;
+
+    lengths
+        .iter()
+        .cloned()
+        .enumerate()
+        .zip(
+            tempos.iter().cloned().chain(
+                vec![state.get::<Tempo>(ctx)]
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .take(1)
+                    .cycle(),
+            ),
+        )
+        .zip(
+            state
+                .pcs(ctx)
+                .and_then(|pcs| {
+                    if pcs.is_empty() {
+                        Some(vec![
+                            vec![Pc::None]
+                                .iter()
+                                .cloned()
+                                .cycle()
+                                .take(rows)
+                                .collect::<Vec<Pc>>(),
+                        ])
+                    } else {
+                        Some(pcs)
+                    }
+                })
+                .unwrap_or_default()
+                .iter()
+                .cycle()
+                .take(cols),
+        )
+        .for_each(|(((col, lengths), tempos), pcs)| {
+            // dbg!(col, &lengths, &tempos, &pcs);
+            lengths
+                .iter()
+                .cloned()
+                .enumerate()
+                .zip(tempos.iter().cycle())
+                .zip(pcs.iter())
+                .for_each(|(((row, length), tempo), pc)| {
+                    let beam_ = if length.as_u64() < tempo.0.to_u64().unwrap() {
+                        if !beam {
+                            beam = !beam;
+                            SB
+                        } else {
+                            '\u{200b}'
+                        }
+                    } else {
+                        if beam { EB } else { '\u{200b}' }
+                    };
+                    // dbg!(row, &length, tempo, pc);
+                    if matches!(*pc, Pc::None) {
+                        lines[row][col] = format!("{:<3}", length.to_rest(tempo));
+                    } else {
+                        lines[row][col] = format!("{:<3}", length.to_note(tempo));
+                    }
+                });
+        });
+
+    // dbg!(&lines);
+
+    // let lines = lines
+    //     .into_iter()
+    //     .map(|row| (row.join("\u{200B}")))
+    //     .collect::<Vec<String>>();
+
+    // dbg!(&lines);
+
+    let sanitised: Vec<Vec<String>> = lines
+        .iter()
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| {
+                    line.chars()
+                        .filter(|ch| {
+                            matches!(*ch, '\u{1d13a}'..'\u{1d164}' | '\u{0020}' | '\u{200b}')
+                        })
+                        .collect::<String>()
+                })
+                .collect()
+        })
+        .collect::<Vec<Vec<String>>>();
+    // dbg!(&sanitised);
+
+    // let sanitised = sanitised.iter().map(|s| s.chars().count()).collect::<Vec<usize>>();
+    // dbg!(sanitised.iter().all(|ln| *ln == 3));
+
+    let cols = size().unwrap().0 as usize;
+
+    let notes = lines
+        .into_iter()
+        .map(|lines| lines.join(""))
+        .collect::<Vec<String>>()
+        .join("\n");
+
+    // .join("\n");
+    // dbg!(&notes);
+    notes
+}
+
+#[inline(always)]
+pub fn state_str(state: &State, ctx: Ctx) -> String {
     let parent = state.parent(ctx);
+
+    let parent_str = match parent {
+        Ctx::Id(_) => format!("{:?} {:?}", parent, state.scope(parent)).to_uppercase(),
+        Ctx::Root => format!("ROOT {:?}", state.scope(parent)).to_uppercase(),
+        Ctx::None => " ".to_string(),
+    };
+
+    let child_str = match ctx {
+        Ctx::Id(_) => format!("{:?} {:?}", ctx, state.scope(ctx)).to_uppercase(),
+        Ctx::None => format!(" "),
+        Ctx::Root => format!("ROOT {:?}", state.scope(ctx)).to_uppercase(),
+    };
+
+    // let tempo: Tempo = state.get(ctx);
+
+    let len: usize = 1;
+
+    let pcs: String = state
+        .pcs(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(|pcs| {
+            format!(
+                "[{}]",
+                pcs.into_iter()
+                    .map(|pc| format!(
+                        "{0:^1$}",
+                        if matches!(pc, Pc::None) {
+                            String::from("None")
+                        } else {
+                            pc.as_f64().to_string()
+                        },
+                        len
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    let velocities: String = state
+        .velocities(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(|velocities| {
+            format!(
+                "[{}]",
+                velocities
+                    .into_iter()
+                    .map(|velocity| format!("{0:^1$}", velocity.0, len))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    let registers: String = state
+        .registers(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(|registers| {
+            format!(
+                "[{}]",
+                registers
+                    .into_iter()
+                    .map(|register| format!("{0:^1$}", register.as_i8(), len))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    let lengths: String = state
+        .lengths(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(|lengths| {
+            format!(
+                "[{}]",
+                lengths
+                    .into_iter()
+                    .map(|length| format!("{0:^1$}", length.as_u64(), len))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    let tempos: String = state
+        .tempos(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(|tempos| {
+            format!(
+                "[{}]",
+                tempos
+                    .into_iter()
+                    .map(|tempo| format!(
+                        "\u{1d15f} = {0:^1$}",
+                        60_000_000 / tempo.0.to_u64().unwrap(),
+                        len
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    let programs: String = state
+        .programs(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(|programs| {
+            format!(
+                "[{}]",
+                programs
+                    .into_iter()
+                    .map(|program| format!("{0:^1$}", program.0, len))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
     let mut text = format!(
-        "{:?} {:?} -> {:?} {:?}\nProg: {:?}\nPCs : {:?}\nVel : {:?}\nReg : {:?}\nLens: {:?}\nTmps: {:?}\nChil: {:?}\n",
-        parent,
-        state.scope(parent),
-        ctx,
-        state.scope(ctx),
-        state.programs(ctx),
-        state.pcs(ctx),
-        state.velocities(ctx),
-        state.registers(ctx),
-        state.lengths(ctx),
-        state.tempos(ctx),
-        // state.bindings(ctx),
+        // "{:?} {:?} -> {:?} {:?}\nProg: [{programs}]\nPCs : [{pcs}]\nVel : [{velocities}]\nReg : [{registers}]\nLens: [{lengths}]\nTmps: [{tempos}]\nBnds: {:?}\nChil: {:?}\n",
+        "{} -> {}\nPCs : [{pcs}]\nVel : [{velocities}]\nReg : [{registers}]\nLens: [{}]\nProg: [{programs}]\nTmps: [{}]\nChil: {:?}\n",
+        parent_str,
+        child_str,
+        // state
+        //     .bindings(ctx)
+        //     .keys()
+        //     .map(|key| key.0.clone())
+        //     .collect::<Vec<_>>(),
+        lengths,
+        tempos,
         state.children(ctx),
     );
     text
 }
 
-fn to_edges(ctx: Ctx, state: &State) -> Vec<(u32, u32)> {
-    // eprintln!("{}edge {ctx:?}{}", TextStyle::IntenseRed, TextStyle::ResetColor);
-    let mut edges = Vec::<(u32, u32)>::new();
-    let mut children = state.children(ctx);
+pub fn info(msg: String) {
+    execute!(
+        stderr(),
+        SavePosition,
+        MoveTo(0, 2),
+        Clear(ClearType::CurrentLine),
+        Print(msg),
+        Clear(ClearType::UntilNewLine),
+        RestorePosition
+    );
+}
 
-    let mut edges: Vec<(u32, u32)> = edges
-        .into_iter()
-        .chain(children.iter().flat_map(|ctx_| {
-            vec![(ctx.to_u32(), ctx_.to_u32())]
-                .into_iter()
-                .chain(to_edges(*ctx_, state))
-        }))
-        .collect();
+pub fn status(msg: String) {
+    execute!(
+        stderr(),
+        SavePosition,
+        MoveTo(0, 0),
+        Clear(ClearType::CurrentLine),
+        Print(msg),
+        Clear(ClearType::UntilNewLine),
+        RestorePosition
+    );
+}
+
+#[inline(always)]
+pub fn time_log(msg: String) {
+    execute!(
+        stderr(),
+        SavePosition,
+        MoveTo(0, 1),
+        Clear(ClearType::CurrentLine),
+        Print(msg),
+        Clear(ClearType::UntilNewLine),
+        RestorePosition
+    );
+}
+
+pub fn log(msg: String) {
+    execute!(
+        stderr(),
+        SavePosition,
+        MoveTo(0, 3),
+        Clear(ClearType::CurrentLine),
+        Print(msg),
+        Clear(ClearType::UntilNewLine),
+        RestorePosition
+    );
+}
+
+#[inline(always)]
+pub fn misc(msg: String) {
+    execute!(
+        stderr(),
+        SavePosition,
+        MoveTo(0, 4),
+        Clear(ClearType::FromCursorDown),
+    );
+    msg.split("\n").into_iter().for_each(|line| {
+        execute!(
+            stderr(),
+            Print(line),
+            Clear(ClearType::UntilNewLine),
+            MoveToColumn(0),
+            MoveDown(1)
+        );
+    });
+    // execute!(stderr(), Clear(ClearType::FromCursorDown), RestorePosition);
+}
+
+fn to_edges(ctx: Ctx, state: &State, layers: usize) -> Vec<(u32, u32)> {
+    // eprintln!("{}edge {ctx:?}{}", TextStyle::IntenseRed, TextStyle::ResetColor);
+    if layers == 0 {
+        return vec![];
+    }
+    let mut children = state.children(ctx);
+    let mut edges = Vec::<(u32, u32)>::new();
+    children.iter().cloned().for_each(|ctx_| {
+        &mut edges.push((ctx.to_u32(), ctx_.to_u32()));
+        &mut edges.extend(to_edges(ctx_, state, layers - 1));
+    });
 
     edges.sort();
 
     edges
 }
 
-pub fn graph(state: &mut State, ctx: Ctx) {
+pub fn graph(state: &State, mut ctx: Ctx, layers: usize) {
+    if ctx == Ctx::None {
+        ctx = Ctx::Root;
+    }
+
     let width = size().unwrap().0;
 
-    let edges = to_edges(ctx, state);
+    let edges = to_edges(ctx, state, layers);
 
     let mut layouts = from_edges(
         edges.as_slice(),
         &Config {
             minimum_length: 1,
             vertex_spacing: 1.,
-            dummy_vertices: true,
+            dummy_vertices: false,
             dummy_size: 0.5,
             ranking_type: RankingType::MinimizeEdgeLength,
             ..Config::default()
@@ -376,14 +993,18 @@ pub fn graph(state: &mut State, ctx: Ctx) {
     );
 
     if let Some((layout, width, height)) = layouts.iter_mut().next() {
+        layout.iter_mut().for_each(|(_, (x, _))| {
+            *x = *width - *x;
+        });
+
         // dbg!(&layout);
         // layout.reverse();
         // dbg!(&layout);
-        layout.sort_by(|(lhs, (_, _)), (rhs, (_, _))| lhs.cmp(rhs));
+        // layout.sort_by(|(lhs, (_, _)), (rhs, (_, _))| lhs.cmp(rhs));
         // dbg!(&layout);
         let (c, r) = size().unwrap();
         let (mut c, mut r) = (c as usize, r as usize);
-        let width = layout
+        let graph_width = layout
             .iter()
             .max_by(|(_, (x1, _)), (_, (x2, _))| {
                 (f64::ceil(*x1) as usize).cmp(&(f64::ceil(*x2) as usize))
@@ -392,17 +1013,43 @@ pub fn graph(state: &mut State, ctx: Ctx) {
             .1
             .0;
 
-        let mut columns = f64::ceil(width) as usize;
+        // dbg!(graph_width, *height);
 
-        columns += 1;
+        let mut columns = (f64::ceil(graph_width).max(1.)) as usize;
 
-        let column_width = f64::floor(c as f64 / columns as f64) as usize;
-        let height = f64::ceil(*height) as usize * 3;
+        // columns += 1;
+
+        let column_width = (f64::ceil(c as f64 / columns.max(1) as f64) as usize).max(2);
+        // dbg!(f64::ceil(graph_width).max(1.), columns, column_width);
+        let node_height: usize = 4;
+        let height = f64::ceil(*height) as usize * node_height;
+
+        let offset = match column_width % 2 {
+            0 => 1,
+            1 => 0,
+            _ => todo!(),
+        };
 
         let mut table = Vec::<Vec<String>>::from_iter(repeat_n(
-            Vec::<String>::from_iter(repeat_n("\u{00A0}".repeat(column_width / 2), columns)),
+            Vec::<String>::from_iter(repeat_n(
+                format!(
+                    "{}",
+                    // "{2}\x1b[0;41m{0:^1$}{2}",
+                    "\u{00A0}".repeat(column_width - offset),
+                    // column_width,
+                    // TextStyle::ResetColor
+                ),
+                columns,
+            )),
             height,
         ));
+
+        // for lines in table.clone() {
+        //     let line = lines.join("");
+        //     eprintln!("{}", line);
+        // }
+
+        // dbg!(table.len(), table[0].len());
 
         let mut visited = BTreeMap::<usize, (usize, usize)>::new();
 
@@ -431,7 +1078,11 @@ pub fn graph(state: &mut State, ctx: Ctx) {
                 state.children(parent).len()
             };
 
-            let (x, y) = (f64::round(x_) as usize, f64::round(*y) as usize);
+            let (x, y) = ((
+                (f64::floor(x_ / *width * columns as f64) as usize).min(table[0].len().max(1) - 1),
+                ((f64::floor(*y) as usize).min(table.len().max(1) - 1)),
+            ));
+            // dbg!(x, table.len(), y, table[0].len());
             // eprintln!(
             //     "{}{:?} -> {ctx:?} x: {x} y: {y}{}",
             //     TextStyle::IntenseRed,
@@ -441,6 +1092,8 @@ pub fn graph(state: &mut State, ctx: Ctx) {
 
             // dbg!(&visited);
 
+            let table = &mut table;
+
             let scope = match state.scope(ctx) {
                 Scope::Sequence => "SEQ",
                 Scope::Stack => "ST",
@@ -449,90 +1102,243 @@ pub fn graph(state: &mut State, ctx: Ctx) {
             let node_id = ctx.to_usize();
             // dbg!(ctx);
             let ctx_str = if ctx == Ctx::Root {
-                "ROOT".to_string()
+                format!("{0:^1$}", "ROOT", column_width - offset + 1)
             } else {
-                format!("{}", node_id)
+                format!("{0:^1$}", node_id, column_width - offset)
             };
-            let table = &mut table;
-            *(table
-                .iter_mut()
-                .nth(y * 3 + 1)
-                .unwrap_or(&mut Vec::new())
-                .iter_mut()
-                .nth(x)
-                .unwrap_or(&mut String::new())) = format!("{0:^1$}", ctx_str, column_width);
-            *(table
-                .iter_mut()
-                .nth(y * 3 + 2)
-                .unwrap_or(&mut Vec::new())
-                .iter_mut()
-                .nth(x)
-                .unwrap_or(&mut String::new())) = format!("{0:^1$}", scope, column_width);
-            let mut left_branch =
-                (repeat_n('\u{00A0}', column_width / 2).collect::<String>() + "|");
-            let mut right_branch =
-                (repeat_n('\u{00A0}', column_width / 2 - 1).collect::<String>() + "|");
-            let mut branches = &mut String::new();
-            visited.insert(*node, (x, y));
-            // dbg!(&visited);
-            for (node, (x_, y_)) in &visited {
-                // eprintln!(
-                //     "{}NODE: {node} x_: {x_} y_: {y_}{}",
-                //     TextStyle::IntenseBoldBlue,
-                //     TextStyle::ResetColor
-                // );
-                let parent = state.parent(ctx);
-                let node_ctx = Ctx::Id(*node);
-                // dbg!(parent, node_ctx);
-                // dbg!(ctx, node, x, *x_, y, *y_);
-                if *y_ == y {
-                    if x < *x_ {
-                        left_branch =
-                            (repeat_n('_', column_width / 2).collect::<String>() + "|")
-                    } else if x > *x_ {
-                        right_branch = repeat_n('_', column_width / 2 - 1)
-                            .collect::<String>()
-                            ;
-                        // dbg!();
-                        // eprintln!("{branches}");
-                    }
+
+            // dbg!(columns, column_width);
+            let len = state.children(ctx).len();
+            match len {
+                0 => (),
+                1.. => {
+                    *get_branch_mut(x, y * node_height + 3, table) = format!(
+                        "{0:^1$}|{2:^3$}",
+                        "\u{a0}".repeat(column_width / 2 - offset),
+                        column_width / 2,
+                        "\u{a0}".repeat(column_width / 2 - offset),
+                        column_width / 2 - offset
+                    );
                 }
             }
-            *branches = ((branches.clone() + left_branch.as_str()) + "|") + right_branch.as_str();
-            // dbg!();
-            // eprintln!("{branches}");
-            // else if node_ctx == parent && dbg!(x == *x_) && dbg!((y - *y_)) <= 2 {
-            //     branches = &mut table[y * 3][x];
-            //     *branches = format!("{0:^1$}", "|", column_width);
-            // }
-            // if dbg!(node_ctx == parent) {
 
-            // }
+            // * node_height - 1
+            if y > 0 {
+                // *
+                *get_branch_mut(x, y * node_height, table) =
+                    format!("{0:^1$}", "|", column_width - offset);
+            }
+            let sibling =
+                visited
+                    .iter()
+                    .fold((*node, (x, y)), |(node, (x, y)), (node_, (x_, y_))| {
+                        if *y_ == y
+                            && *x_ < x
+                            && state.parent(ctx).to_usize()
+                                == state.parent(Ctx::from(*node_)).to_usize()
+                        {
+                            (*node_, (*x_, *y_))
+                        } else {
+                            (node, (x, y))
+                        }
+                    });
+
+            // dbg!(&node, &sibling);
+            if sibling != (*node, (x, y)) {
+                let (sibling_node, (sibling_x, sibling_y)) = sibling;
+                let mut default_vec = Vec::<String>::new();
+                let mut default_string = String::new();
+                let node_branch = get_branch_mut(x, y * node_height - 1, table);
+                *node_branch = format!(
+                    "{0:<1$}",
+                    "_".repeat(column_width / 2 - offset),
+                    column_width / 2 - offset
+                );
+                let mut space = "\u{a0}".repeat(column_width / 2 - 1 - offset);
+                let (x_, _) = visited
+                    .get(&state.parent(ctx).to_usize())
+                    .cloned()
+                    .unwrap_or_default();
+                if x_ == x {
+                    *node_branch += "|";
+                } else {
+                    *node_branch += "_";
+                    // space = "\u{a0}".repeat(column_width / 2 );
+                }
+
+                *node_branch += space.as_str();
+                let leftmost_sibling_branch =
+                    get_branch_mut(sibling_x, sibling_y * node_height - 1, table);
+
+                let branch_len = leftmost_sibling_branch.len();
+                let mut branch: String = space;
+
+                // eprintln!("{}{}", color!(), sibling);
+                // dbg!(ctx.to_usize(), x, y, node, x_, y_);
+
+                if visited.iter().any(|(node, (x_, y_))| {
+                    state.parent(ctx).to_usize() == Ctx::from(*node).to_usize() && *x_ == x
+                }) {
+                    branch += "|";
+                } else {
+                    branch += "_";
+                }
+                branch += "_".repeat(column_width / 2 - offset).as_str();
+                // dbg!(size_of_val(&sibling.as_bytes()), column_width / 2, size_of_val(&'\u{a0}') );
+                *leftmost_sibling_branch = branch;
+
+                let mut x_ = sibling_x + 1;
+
+                while x_ < x {
+                    let branch = get_branch_mut(x_, node_height * sibling_y - 1, table);
+                    *branch = "_".repeat(column_width / 2 - offset);
+                    if let Some(parent) = visited.get(&parent.to_usize()) {
+                        if parent.0 == x_ {
+                            *branch += "|";
+                        }
+                    } else {
+                        *branch += "_";
+                    }
+                    *branch += "_".repeat(column_width / 2 - offset).as_str();
+                    x_ += 1
+                }
+
+                // eprintln!("{}{}", color!(), sibling)
+            }
+
+            *get_branch_mut(x, y * node_height + 1, table) =
+                format!("{0:^1$}", ctx_str, column_width - offset);
+
+            *get_branch_mut(x, y * node_height + 2, table) =
+                format!("{0:^1$}", scope, column_width - offset);
+
+            // dbg!(&visited);
+            visited.insert(ctx.to_usize(), (x, y));
         }
 
         // drop(&mut *table);
 
-        for mut row in &mut *table {
-            row.reverse();
+        // for mut row in &mut *table {
+        //     row.reverse();
+        // }
+
+        execute!(stderr(), SavePosition, MoveTo(0u16, height as u16 / 3 as u16));
+        for lines in table.clone() {
+            let line = lines.join("");
+            if line.chars().all(|c| c == '\u{a0}' || c == ' ') {
+                continue;
+            }
+            eprintln!("{0:^1$}", line, size().unwrap().0 as usize);
         }
 
-        if let Ok(mut colonnade) = Colonnade::new(columns, c) {
-            colonnade.hyphenate(false);
-            colonnade.fixed_width(column_width);
-            colonnade.padding_horizontal(1);
-            colonnade.left_margin(0);
-            colonnade.alignment(Alignment::Center);
-            // execute!(stderr(), cursor::MoveTo(0, 0));
-            let mut table = colonnade.tabulate(table).unwrap();
+        execute!(stderr(), RestorePosition);
 
-            for lines in table {
-                eprintln!(
-                    "{}{lines}{}",
-                    TextStyle::IntenseBoldPurple,
-                    TextStyle::ResetColor
-                );
-            }
-            eprintln!("");
+    }
+}
+
+fn get_branch_mut(x: usize, y: usize, table: &mut Vec<Vec<String>>) -> &mut String {
+    // dbg!(x, y);
+    &mut table[y][x]
+}
+
+pub fn trace(style: TextStyle) {
+    let s = format!(
+        "{style}{}{}",
+        std::backtrace::Backtrace::capture()
+            .to_string()
+            .split("\n")
+            .filter(|s| s.contains("dsch") || s.contains("compiler"))
+            .collect::<Vec<&str>>()
+            .join("\n"),
+        TextStyle::ResetColor
+    );
+    misc(s);
+}
+
+pub fn bezier<T: Clone + Into<f64>>(pts: Vec<T>, t: f64) -> f64 {
+    match pts.len() {
+        ..=1 => pts[0].clone().into(),
+        2 => (1.0 - t) * pts[0].clone().into() + t * pts[1].clone().into(),
+        len @ 2.. => bezier(
+            vec![
+                bezier(pts[..len - 1].to_vec(), t),
+                bezier(pts[1..].to_vec(), t),
+            ],
+            t,
+        ),
+    }
+}
+
+// pub fn print_timeline(state: &mut State) {
+//     state
+//         .timeline()
+//         .clone()
+//         .iter()
+//         .cloned()
+//         .enumerate()
+//         .for_each(|(idx, (t, ctx))| {
+//             let lengths = state
+//                 .lengths(ctx)
+//                 .unwrap_or_default()
+//                 .iter()
+//                 .cloned()
+//                 .map(|lengths| {
+//                     // dbg!(&length);
+//                     lengths
+//                         .iter()
+//                         .map(|length| format!("{}", length.as_u64()))
+//                         .collect::<Vec<_>>()
+//                         .join(" ")
+//                 })
+//                 .collect::<Vec<String>>()
+//                 .join(", ");
+//             // eprintln!(
+//             //     "{}{idx}: T:{t} ID:{} DUR: {lengths}",
+//             //     color!(),
+//             //     ctx.to_usize(),
+//             // );
+//         });
+// }
+
+pub fn pause() {
+    let _ = std::io::stdin().read_line(&mut String::new());
+}
+
+pub fn flatten<T: Clone + Debug>(data: &mut Vec<Vec<T>>) {
+    // dbg!(&data);
+    if data.len() > 0 {
+        *data = vec![data.iter().cloned().flatten().collect()];
+    }
+    // dbg!(&data);
+}
+
+pub fn convert_vec<T: Clone + From<U>, U: Clone + From<T>>(vec: Vec<T>) -> Vec<U> {
+    vec.into_iter()
+        .map(|t| <U as From<T>>::from(t))
+        .collect::<Vec<U>>()
+}
+
+/// B-Spline
+#[allow(non_snake_case)]
+pub fn B(i: usize, p: usize, t: f64, ts: &Vec<f64>) -> f64 {
+    if p == 0 {
+        1.0
+    } else {
+        let t0 = ts[i];
+        let tp = ts[i + p];
+        let tO = ts[i + p + 1];
+
+        if t < t0 || t >= tO {
+            0.0
+        } else {
+            (t - t0) / (tp - t0) * B(i, p - 1, t, ts)
+                + (tO - t) / (tO - tp) * B(i + 1, p - 1, t, ts)
         }
     }
+}
+
+#[allow(non_snake_case)]
+pub fn C(p: Vec<f64>) -> f64 {
+    let j = p.len();
+    todo!()
 }

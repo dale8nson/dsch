@@ -1,11 +1,8 @@
 #![allow(unused, const_item_mutation)]
 use std::{
-    default,
-    fmt::Display,
-    hash::{BuildHasher, DefaultHasher},
-    ops::{Add, Div, Mul, Rem, Sub},
-    str::FromStr,
+    collections::VecDeque, default, fmt::Display, hash::{BuildHasher, DefaultHasher}, ops::{Add, Div, Mul, Rem, Sub}, str::FromStr
 };
+
 
 use crate::compiler::{
     codegen::{self, *},
@@ -21,6 +18,7 @@ pub struct Program {
 pub enum Exp {
     Compound(Compound),
     Simple(Simple),
+    Decl(Decl),
     #[default]
     Noop,
     EOI,
@@ -28,7 +26,7 @@ pub enum Exp {
 
 impl Exp {
     pub fn to_string(&self) -> String {
-        let s = format!("{self}").rsplit_once("::").unwrap().1.to_string();
+        let s = format!("{self}").rsplit_once("::").unwrap().1.replace("}", "").to_string();
         s.clone()
             .chars()
             .map(|c| {
@@ -53,7 +51,6 @@ impl Display for Exp {
                     Compound::Braces(_) => "Compound::Braces",
                     Compound::Brackets(_) => "Compound::Brackets",
                     Compound::Ratio(_) => "Compound::Ratio",
-                    Compound::Decl(_) => "Compound::Decl",
                 }
             ),
             Exp::Simple(simple) => write!(
@@ -63,9 +60,9 @@ impl Display for Exp {
                     Simple::Prefix(prefix) => {
                         "Simple::Prefix(".to_owned()
                             + match prefix {
-                                Prefix::Pc => "Prefix::Pc)",
                                 Prefix::Dur => "Prefix::Dur)",
                                 Prefix::Reg => "Prefix::Reg)",
+                                Prefix::Prog => "Prefix::Prog)",
                             }
                     }
                     Simple::Suffix(suffix) => {
@@ -113,10 +110,13 @@ impl Display for Exp {
                                 .unwrap(),
                         Scalar::Rest => format!("Scalar::Rest"),
                         Scalar::Prog(prog) => format!("Scalar::Prog({}))", prog.0),
+
+                        Scalar::Tuplet(tuplet) => format!("Scalar::Tuplet({tuplet:?}))"),
+                        Scalar::Register(register) => format!("Scalar::Register({register:?}))"),
                         _ => todo!(),
                     }
                     .to_owned(),
-                    Simple::Decl(Decl { ident, binding }) => format!(
+                    Simple::Decl(Decl::ExpDecl(ExpDecl { ident, binding })) => format!(
                         "Simple::Decl(Decl {{ ident: {} binding: {binding} }})",
                         ident.0
                     ),
@@ -126,6 +126,7 @@ impl Display for Exp {
             ),
             Exp::Noop => write!(f, "Exp::Noop"),
             Exp::EOI => write!(f, "Exp::EOI"),
+            Exp::Decl(decl) => write!(f, "Exp::Decl"),
         }
     }
 }
@@ -149,7 +150,24 @@ pub const NOOP: (Exp, codegen::Ctx) = (Exp::Noop, codegen::Ctx::None);
 pub struct Bpm(pub Absolute);
 
 #[derive(Debug, Clone)]
-pub struct Decl {
+pub enum Decl {
+    ImportDecl(ImportDecl),
+    ExpDecl(ExpDecl),
+    FuncDecl(FuncDecl)
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportDecl(Ident);
+
+#[derive(Debug, Clone)]
+pub struct FuncDecl {
+    pub ident: Ident,
+    pub params: Vec<Ident>,
+    pub funcdef: Vec<Exp>
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpDecl {
     pub ident: Ident,
     pub binding: Box<Exp>,
 }
@@ -169,17 +187,29 @@ pub enum Compound {
     Parens(Vec<Exp>),
     Braces(Vec<Exp>),
     Brackets(Vec<Exp>),
-    Ratio(Vec<Absolute>),
-    Decl(Box<Decl>),
+    Ratio(Vec<Absolute>)
+}
+
+impl From<Compound> for VecDeque<Exp> {
+    fn from(value: Compound) -> Self {
+        value.to_vecdeque()
+    }
 }
 
 impl Compound {
-    pub fn to_vec(&self) -> Vec<Exp> {
+    pub fn to_vecdeque(&self) -> VecDeque<Exp> {
         match self {
             Compound::Parens(exps) | Compound::Braces(exps) | Compound::Brackets(exps) => {
-                exps.clone()
+                VecDeque::from_iter(exps.iter().cloned())
             }
-            _ => Vec::<Exp>::new(),
+            _ => VecDeque::new(),
+        }
+    }
+
+    pub fn exps_mut(&mut self) -> &mut Vec<Exp> {
+        match self {
+            Compound::Parens(exps) | Compound::Braces(exps) | Compound::Brackets(exps) => exps,
+            Compound::Ratio(absolutes) => todo!()
         }
     }
 
@@ -189,7 +219,6 @@ impl Compound {
             Compound::Braces(exps) => Exp::Compound(Compound::Braces(exps)),
             Compound::Brackets(exps) => Exp::Compound(Compound::Brackets(exps)),
             Compound::Ratio(abss) => Exp::Compound(Compound::Ratio(abss)),
-            Compound::Decl(decl) => Exp::Compound(Compound::Decl(decl)),
         }
     }
 
@@ -205,9 +234,9 @@ impl Compound {
 
 impl IntoIterator for Compound {
     type Item = Exp;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
+    type IntoIter = std::collections::vec_deque::IntoIter<Self::Item>;
     fn into_iter(self) -> Self::IntoIter {
-        self.to_vec().into_iter()
+        self.to_vecdeque().into_iter()
     }
 }
 
@@ -216,11 +245,17 @@ pub enum Scalar {
     Duration(Duration),
     Frequency(Absolute),
     Pure(Pure),
-    Dynamic(String),
+    Dynamic(Dynamic),
     Tuplet(Tuplet),
     Prog(Prog),
+    Register(Register),
     Rest,
 }
+
+#[derive(Clone, Debug)]
+pub struct Dynamic(pub String);
+
+
 
 #[derive(Debug, Clone)]
 pub struct Frequency(pub Pure);
@@ -254,17 +289,46 @@ impl BuildHasher for Ident {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum Interpolation {
+    #[default]
     Increase,
     Decrease,
+}
+
+impl Display for Interpolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Interpolation::Increase => f.write_str("<"),
+            Interpolation::Decrease => f.write_str(">"),
+        }
+    }
+}
+
+impl From<Data> for Interpolation {
+    fn from(value: Data) -> Self {
+        if let Data::Interpolation(interpolation) = value {
+            interpolation
+        } else {
+            Interpolation::Increase
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Prefix {
     Dur,
-    Pc,
     Reg,
+    Prog
+}
+
+impl Prefix {
+    pub fn unwrap(exp: Exp) -> Option<Self> {
+        match exp {
+            Exp::Simple(Simple::Prefix(prefix)) => Some(prefix),
+            _ => None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -278,6 +342,19 @@ pub enum Suffix {
 pub enum Duration {
     Fixed(Fixed),
     Fractional(Fractional),
+}
+
+impl From<Duration> for Data {
+    fn from(value: Duration) -> Self {
+        match value {
+            Duration::Fixed(fixed) => todo!(),
+            Duration::Fractional(fractional) => match fractional {
+                Fractional::Absolute(absolute) => Length::from(absolute).into(),
+                Fractional::Tuplet(tuplet) => todo!(),
+                Fractional::Rational(rational) => todo!(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +392,7 @@ pub struct Seconds(pub Pure);
 pub enum Pure {
     Relative(Relative),
     Absolute(Absolute),
+    Rational(Rational)
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +410,33 @@ pub enum Absolute {
 impl Default for Absolute {
     fn default() -> Self {
         Absolute::Float(0.0)
+    }
+}
+
+impl Mul<u64> for Absolute {
+    type Output = u64;
+    fn mul(self, rhs: u64) -> Self::Output {
+        match self {
+            Absolute::UInt(uint) => uint * rhs,
+            Absolute::Float(float) => f64::round(float * rhs as f64) as u64,
+        }
+    }
+}
+
+impl Mul<Length> for Absolute {
+    type Output = Absolute;
+    fn mul(self, rhs: Length) -> Self::Output {
+        match self {
+            Absolute::UInt(uint) => Absolute::UInt(uint * rhs.as_u64()),
+            Absolute::Float(float) => Absolute::Float(float * rhs.as_f64()),
+        }
+    }
+}
+
+impl Div<Absolute> for f64 {
+    type Output = f64;
+    fn div(self, rhs: Absolute) -> Self::Output {
+        self / rhs.as_f64()
     }
 }
 
@@ -361,15 +466,18 @@ impl Absolute {
 impl Div for Absolute {
     type Output = Absolute;
     fn div(self, rhs: Self) -> Self::Output {
-        Absolute::Float(f64::round(self.as_f64() / rhs.as_f64()))
+        // Absolute::Float(f64::round(self.as_f64() / rhs.as_f64()))
+        Absolute::UInt((self.as_u64() * 100) / (rhs.as_u64() * 100))
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Sign {
     Plus,
     Minus,
 }
+
+
 
 pub mod utils {
     use crate::compiler::{

@@ -1,61 +1,56 @@
 -- WORDS --
 Strings: #48
-Violin I: #40
+Violin\ I: #40
 Cello: #42
 C#: 1 D: 2 E: 4 F#: 6 G: 7 A: 9 B: 11
 Piano: #0
 Marimba: #13
-ost: (d4 @3 D @2 A B F# G D G A )
-ost8ve: (d4 @2 D @1 A B F# G D G A )
-ln1: (d4 @5 F# E D C# @4 B A B @5 C#)
-ln2: (d4 @5 D C# @4 B A G F# G E)
-ln3: (d8 @4 D F# A G F# D F# E D @3 B @4 D A G B A G)
-ln4: (d8 @4 F# D E @5 C# D F# A @4 A B G A F# D @5 D d3/16 D d16 C#)
-ln5: (d16 @5 D C# D @4 D C# A E F# D @5 D C# @4 B @5 C# F# A B G F# E G F# E D C# @4 B A G F# E G F# E)
+ost: (d4 @3 D @2  A       B     F#    G         D     G     A )
+ost8ve: (d4 @2 D @1  A       B     F#    G         D     G     A )
+ln1:   (d4  @5 F#    E       D     C# @4 B         A     B @5  C#)
+ln2: (d4 @5    D       C# @4   B     A     G         F#    G     E)
+ln3: (d8 @4    D    F# A    G  F# D  F# E  D @3 B @4 D  A  G  B  A G)
+ln4: (d8 @4    F#   D  E @5 C# D  F# A @4 A B G A F# D @5 d7/64 D d64 E D E D E D E D E d16 D C#)
+ln5: (d16 @5   D C# D @4 D C# A E F# D @5 D C# @4 B @5 C# F# A B G F# E G F# E D C# @4 B A G F# E G F# E)
 
 -- COMPOSITION --
 50 bpm
 
-Marimba
+{ p ost }
 
 {
-  ppp ost
-  ppp ost8ve
+  (p ost)
+  --(ppp ost8ve)
+  (mp ln1)
 }
 
 {
-  ppp ost
-  ppp ost8ve
-  pp ln1
+  p ost
+  --ppp ost8ve
+  mp ln1
+  mp ln2
 }
 
 {
-  ppp ost
-  ppp ost8ve
-  pp ln1
-  pp ln2
+  p ost
+  --ppp ost8ve
+  mp ln1
+  mp ln2
+  mp ln3
 }
 
 {
-  ppp ost
-  ppp ost8ve
-  pp ln1
-  pp ln2
-  pp ln3
+  p ost
+  --ppp ost8ve
+  mp ln2
+  mp ln3
+  mp ln4
 }
 
 {
-  ppp ost
-  ppp ost8ve
-  pp ln2
-  pp ln3
-  pp ln4
-}
-
-{
-  ppp ost
-  ppp ost8ve
-  pp ln3
-  pp ln4
-  pp ln5
+  p ost
+  --ppp ost8ve
+  mp ln3
+  mp ln4
+  mp ln5
 }

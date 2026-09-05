@@ -1,0 +1,6 @@
+CMaj:  { 0 4 7 12 }
+
+{
+  ppp d4 @4 ( CMaj @5 CMaj )
+  ppp d4 @5 ( CMaj @4 CMaj )
+}
