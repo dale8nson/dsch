@@ -84,7 +84,7 @@ Pitch classes are bare numbers with no prefix (`0 3 7 10`) — the `pc` prefix k
 | `@` | Register (octave) |
 | `@+<n>` `@-<n>` | Relative register offset — **new this revision**, e.g. `@+1` shifts up an octave from the current register |
 | `d` | Duration prefix |
-| `#` | Bare program-change prefix — **new this revision**, grammar-only; `compose_prefix` has no arm for it yet (`todo!()`). The atomic `#<n>` scalar form works fine; this is for a compound argument (e.g. `# (...)`) |
+| `#` | Bare program-change prefix — **new this revision**, grammar-only. Only single-program use works, and only via the atomic `#<n>` scalar setting an ambient program for whatever compound follows (e.g. `#48 (...)`); the `#` prefix taking a compound argument directly (e.g. `# (48)`, `# (48 13)`) has no arm in `compose_prefix` and panics (`todo!()`) regardless of how many programs the compound holds — that path depends on "homogeneous layers" (`Layer::Homogenous`/`HomogenousLayer` in `codegen/mod.rs`), which are defined but not wired into anything yet |
 
 **Suffix:**
 
@@ -191,7 +191,7 @@ A Pest PEG grammar (`grammar.pest`) drives a hand-written recursive-descent walk
 | `*` repetition of a `(...)`/`{...}` group by a plain integer | Working (new this revision) |
 | `<`/`>` interpolation/ramps between two or more `Duration`, `Register`, or `Dynamic` values | Working (new this revision) |
 | `import`/function declarations (`Decl::ImportDecl`, `Decl::FuncDecl`) | Grammar + AST only — `todo!()` in the composer |
-| `#` (program) prefix with a compound argument | `todo!()` — only the atomic `#<n>` scalar works |
+| `#` (program) prefix with a compound argument | `todo!()` regardless of a single vs. multiple programs — depends on the not-yet-wired-up "homogeneous layers" mechanism. The atomic `#<n>` scalar (single program, e.g. `#48 (...)`) works fine on its own |
 | `@` (register) prefix with a compound argument (e.g. `@ (4 5)`) | `todo!()` |
 | `compose_infix` for `:`, `><`, `..`, `+`, `-`, `/` | `todo!()` |
 | `compose_suffix` (`^`, bare `bpm`/`Hz` as suffixes), relative numbers as a tempo suffix (`+n bpm`) | `todo!()` |
