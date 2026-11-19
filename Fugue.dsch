@@ -1,0 +1,85 @@
+C#: 1 Cx: 2 D: 2 D#: 3 E: 4 E#: 5 F#: 6 Fx: 7 G: 7 G#: 8 A: 9 A#: 10 B: 11 B#: 0
+
+100 bpm
+
+-- bb 1-3
+
+@3 d1 C# d2 B# @3 E d1 D#
+
+-- bb 4-11
+
+{
+  (d3.5/1 ~ @4 d2 C# B# E d1 D# d2 C# d3/4 F# d4 E D# C#)
+  (@3 d1 G# d2 Fx B d1 A# d2 G# d3/4 A d8 G# F# d4 G# @4 C# @3 F# d8 G# A d3/4 B d4 A G# F# d2 G# d4 F# E )
+  (@3 d4 C# D# d3/4 E d8 D# C# d4 D# G# C# d8 D# E d3/4 F# d4 E D# C# d2 D# d3/4 C# @2 d4 B A G# d2 A A# @3 B# C#)
+}
+
+-- bb 12-23
+
+{
+  (@5 d2.5/1 ~ d2 C# B# E d1 D# d3/4 C# d4 D# E D# d2 C# @4 B @5 C# D# d3/4 ~ d4 E D# C# @4 B @5 D# d3/4 G# d4 F# G# A)
+  (@4 d2 ~ G# E# A G# d1 F# @5 C# @4 B d2 A G# d3/4 A d4 G# F# E d2 A# d1 G# d2 Fx G# ~ d1 ~)
+  (@4 d2 C# @3 B @4 C# d3/4 F# d4 E D# C# d2 D# G# d4 ~ A G# F# E# C# d2 F# d1.5/1 E d2 G# D# d2/1 ~ @3 d2 B d3/4 C# d4 C#)
+  (@3 d3/4 D# d4 D d2/1 C# d4.5/1 ~ d2 G# Fx B d1 A# d4 G# A G# F# d2 E# A)
+  (@2 d4 G# A d3/4 B d4 A G# F# @3 d2 C# @2 d3/4 A d4 G# F# E d2 F# G# d4 A G# A B @3 C# @2 B @3 C# D# d2 E d3/4 C# @2 d4 B A# G# @3 d2 C# D# @2 G# ~ d1 ~)
+}
+
+-- bb 24-35
+
+{
+  (mf @5 d1.25/1 B d4 A G# F# d8 G# F# E D# d1 C# @4 d3/4 B d4 @5 C# @4 B A d2 G# d4 A# B @5 d2 C# @4 d1 B d2 A# d1.25/1 f B d4 @5 f C# D# d3/4 E d2 D# mf > pp (d4 E D# E F#))
+  (@4 d4 D# C# D# E# d2 F# A G# d8 ~ B A G# d4 F# A G# F# d2 E# d3/4 F# d5/4 E d2 D# {d1.25/1 E C#} d4 D# E d8 F# G# d2 F# d3/4 B @5 d4 C# @4 B A d2 mf G# ~ )
+  (@4 d1.5/1 ~ d2 C# B# E d1 D# d2/1 C# @3 d4 F# G# A# B d2/1 ~ @4 d2 D# G# d1 F# d2 mf E ~)
+  (@3 d1 G# d1.25/1 F# d8 G# F# d4 E d8 F# G# d4 A F# d2 G# d2.5/1 C# d2 F# d4 E D# E F# G# F# G# A d2.5/1 mf B @4 d2 mp C#)
+  (@2 d5.5/1 ~ d2 B A# @3 D# d1 C# d1.25/1 @2 B @3 d4 G# F# E d2 B @2 B @3 mf E mp A)
+}
+
+-- bb 36-51
+
+{
+  mp (@5 d8 G# F# G# A G# F# E G# F# E F# G# F# E D# F# E D# E F# E D# C# E D# C# D# E D# C# @4 B @5 D# C# @4 B @5 C# D# C# @4 B A# @5 C# @4 d2.5/4 B @5 d8 C# D# @4 B @5 d3/4 C# d4 E d3/4 D# d4 F# d1.25/1 E d2 D# C# d8 B# @4 A# @5 d4 B# D# d8 G# F# G# A G# F# E G# F# E F# G# F# E D# F# d2 E# A d5/4 G# d8 F# E d2 D)
+  mp (d2.5/1 ~ @4 d2 G# Fx B d1.25/1 A# d4 D# d3/4 G# d8 F# E d3/4 F# d8 E F# d2.5/1 G# d4/1 ~ )
+  mp (d8.5/1 ~ @5 d2 C# B# E d1.5/1 D# d1 C# d4 B# @4 d3/8 B d8 B @5 C# D C# @4 B A @5 C# @4 B A B @5 C# @4 B A G# B d1.25/2 A d8 @5 C# @4 B A)
+  mp (@4 d2 B# E d1 D# d1.25/1 C# d4 @3 B A# d2 G# d8 Fx E# d2 Fx d8 G# A# G# Fx G# A# B G# A B A G# A# B @4 C# @3 A# B @4 C# @3 B A# @4 B# C# D# B# d1 C# d4/1 ~ d4 ~ @4 C# F# F# F# d8 E# D# d2 E# d4 F# @3 d8 F# G# d4 A B)
+  mp (@3 d2 G# @4 d1 C# d2 B# d2 C# ~ d5/1 ~ d4 ~ @3 d8 C# D# d4 E F# d8 G# F# G# A G# F# E G# F# E F# G# F# E D# F# E D# E F# E A G# A D# C# D# E D# G# F# G# d2 C# d2/1 ~ d2 F#)
+}
+
+ -- bb 52-60
+
+{
+  mp (@5 d4 ~ C# F# F# F# d8 E D d3/4 E d8 D C# d1 D d2 C# F# d3.5/4 E d8 F# E D C# E D C# D E D C# @4 B @5 D d1 C# d2 B# E)
+  mp (@4 d2 G# d2/1 ~ d2 A G# @5 C# @4 d1.25/1 B d4 E A A A d8 G# F# d3/4 G# d8 C# D# d4 E F# d8 G# F# G# A G# F# E G#)
+  mp (@4 d8 C# @3 B @4 C# D C# @3 B A @4 C# @3 B A B @4 C# @3 B A G# B A G# A B A B @4 C# D E D E F# E D C# E D C# D E D C# @3 B @4 D C# @3 B @4 C# D C# @3 B A @4 C# d1 @3 B d8 A G# F# E D# C# B# C# d2 D# ~)
+  mp (@3 d2 E# A d1 G# F# d5/1 ~ d4 ~ G# @4 C# C#)
+  mp (@3 d3/1 ~ d4 ~ E A A A d8 G# F# d2 G# A F# @2 B @3 E d1 @2 A d2 G# ~ )
+}
+
+-- bb 61-73
+
+{
+  (@5 d1.25/1 D# @4 d4 G# @5 C# C# C# d8 @4 B A d1 B d2 A G# ~ @5 d1 D# d2 Cx F# E# E d8 D# C# D# E D# C# @4 B @5 D# C# @4 B @5 C# D# C# E D# C# d2 B# @4 B A# A G# ~)
+  (@4 d8 F# E F# G# F# E D# F# E D# E F# E D# C# E D# C# D# E D C# @3 B @4 D C# @3 B @4 C# D C# E D# C# d2 B# C# d4 D# D# d8 G# A# d2 B d4 A# @5 D# D# D# d8 C# B# d1 C# @4 d2 B A# d3/4 A d4 D# G# d2 G# d8 F# E# d1 F# d2 E)
+  (@4 d4 C# d8 B# @3 A# d2 @4 B# d2 C# @3 A F# G# E# F# G# E Fx G# d4 E# ~ d2 ~ d1 ~ d4 ~ D# G# G# G# d8 F# E d1.25/2 F# d8 A G# F# E# D# E# C# F# E# F# G# A G# A B @4 C# B# C# D# E D# E F# )
+  (@3 d3/1 ~ d4 ~ C# F# F# F# d8 E D# d2 E d1 D# d7/1 ~ )
+  (@2 d4/1 ~ d4 ~ G# @3 C# C# C# @2 d8 B A# B A# G# B A# G# A# B A# G# F# A# G# F# G# A# G# B A# G# d2 Fx G# A# @3 D# @2 G# ~ d1 ~ @2 d1 C#)
+}
+
+-- bb 74-89
+
+{
+  (@4 d2 D# C# d1 D# @5 C# d2 B# E d1.5/1 D# d1 C# d2 B# d4 ~ d8 C# D# d4 E F# d8 G# F# G# A G# F# E G# F# E F# G# F# E D# F# E D# E F# E D C# E D C# D E D C# @4 B @5 D C# @4 B @5 C# D C# @4 B A @5 C# @4 B A B @5 C# @4 B A G# B d2 A ~ @5 d1 C#)
+  (@4 d3/1 ~ d4 ~ G# @5 C# C# C# d8 B# @4 A# @5 B# C# D# B# @4 G# F# G# A G# F# E G# F# E F# G# F# E D# F# E G# A B @5 C# D# B# C# d4 D# d3/4 ~ d2/1 ~ d4 ~ @4 F# B B B d8 A G# d2 F# @3 d1 G# d2 A )
+  (@4 d8 G# F# G# A G# F# E G# F# E F# G# F# E D# F# E D# E F# E D# C# E d2 D# ~ d7/1 ~ d3/4 ~ d4 F# d2 E# A d2.25/2 G# d8 G# F# E# d2 F# d1.25/2 G# d8 G# F# E)
+  (@2 d4 ~ G# @3 C# C# C# d8 B# @2 A# @3 d2 B# C# ~ d2/1 ~ d4 ~ E A A A d8 G# F# d4 G# @2 G# @3 C# @2 B d2 A d4 G# @3 G# @4 C# C# C# d8 B# @3 A# @4 d2 B# d1 C# @3 d2 B d1 G# d2 F# B @4 d2.25/2 C# d8 C# @3 B A d1 G#)
+  (@2 d2 B# E d1 D# d4 C# d8 C# D# d4 E F# d8 G# F# G# A G# F# E G# F# E F# G# F# E D# F# d4 E d3/4 ~ d1 ~ @3 d2 C# @2 A @3 B# E d1 D# d4 C# E A A A d8 G# F# d3/4 ~ d4 C# F# F# F# d8 E# D# d2 E# F# d1.25/2 F# d8 F# E D# d4 E C#)
+}
+
+-- bb 90-115
+
+{
+  (@5 d2 B# E d1.25/1 D# d4 C# G# G# G# d8 F# E d2 F# d1 E d2 D# G F# @4 F# E# A d4 G# G# @5 C# C# C# B# F# F# F# d8 E D# d4 E d8 D# C# d4 D# B# d1.5/1 C# d2 B# @4 B A# A d1 G# d2 A# @5 B# d1 C# d2 B# d1 E d4 D# C# d2 B# d1 C# d2 B# d4/1 C#)
+  (@4 d8 D# A G# F# E G# @5 C# @4 B A G# A F# d3/4 G# @5 d8 C# B# d3/4 C# @4 d4 A# @5 d4 D# D# D# d8 C# @4 B @5 d2 C# @4 B B A# @5 D d1 C# @4 d4 G# G# @5 C# C# C# d8 B# @4 A# @5 B# C# d2 D# d8 C# B# d2 C# @4 F# d1 G# d3/4 F# d4 ~ d2 ~ d4 ~ C# F# F# F# d8 E D# d1.5/2 E d8 F# G# d4 A d2 G# d4 E A A A d8 G# F# d4 D# d8 A# B# @5 d2 C# @4 A# G# d2/1 G# d2 F# E# A d2/1 G#)
+  (@3 d5/1 ~ d4 ~ B @4 E E E d8 D C# @3 d4 B ~ ~ @4 C# F# F# F# d8 E D# d2 E d1.75/2 F# d8 G# d4 A d8 G# F# d4 G# d8 F# E d2 D# d1 E d4 D# C# D# d8 E# F# d4 G# G# G# d8 F# E d4 D# C# d2 B# d1 C# d2 D# d4 C# C# F# F# F# d8 E D# d4 E d8 F# G# d2 A# d1 D# d2 E d1.5/2 D# d8 E F# d4 E# d1 C# d4 C# F# F# d2 F# d4 E# D# d1 E#)
+  (@3 d1 G# d2 F# D# d8 E D# E F# E D# C# E D# C# D# E D# C# B# D# d4 C# E A A A d8 G F# d2 E d4 ~ F# B B B d8 A G# A G# F# E d2 D# d4 ~ G# @4 D# D# D# d8 C# B# d1 C# d2 B# E d4 ~ @3 C# F# F# F# d8 E# D# d1 C# d3/4 D# d4 D# G# G# G# d8 F# E d4 F# F# F# d8 E D# d4 E d8 D# C# d4 D# @2 G# @3 C# C# C# @2 d8 B A# @3 d1.25/2 D# d8 E d1.5/4 F# d8 E D# C# d1 G# d3/4 A d8 G# A d4 B A G# F# @4 C# @3 d8 B A d4 G# F# d1 G#)
+  (@2 d4 ~ G# @3 C# C# C# d8 B# @2 A# @3 B# C# D# B# @2 d2 E d4 ~ A d2 D# d4 ~ G# C# ~ d2 ~ d2.5/1 ~ d2 @3 C# B# E d1 D# d4 C# E A A A d8 G# F# E D# C# @2 B d2 A# d3/4 A d8 G# F# d2 E# d1 F# d4/1 G# d1 Fx d2/1 G# @3 d4/1 C#)
+}
