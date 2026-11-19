@@ -1,10 +1,16 @@
-use crossterm::{cursor::*, execute, style::*, terminal::*};
+use crossterm::{
+    cursor::*,
+    execute,
+    style::*,
+    terminal::{ClearType::UntilNewLine, *},
+};
 use num_rational::BigRational;
 use pest::state;
 
 use crate::{
-    color,
+    c, color,
     compiler::{
+        ast::Scalar::Rest,
         codegen::{
             Data,
             utils::{TextStyle::*, *},
@@ -12,15 +18,17 @@ use crate::{
         },
         error,
     },
+    pest_parser::Rule::controller,
 };
 use std::{
     any::{Any, TypeId},
-    backtrace,
+    backtrace, clone,
     collections::{BTreeMap, HashMap, HashSet},
     convert,
     io::stderr,
-    iter::{Cloned, Enumerate, Map, repeat_n, zip},
+    iter::{Cloned, Enumerate, Map, from_fn, repeat_n, zip},
     ops::{DerefMut, Index, IndexMut},
+    process::exit,
     slice::{Iter, IterMut},
     vec::IntoIter,
 };
@@ -48,6 +56,8 @@ pub struct State {
     velocities_: HashMap<Ctx, Vec<Vec<Velocity>>>,
     tempo: Mpb,
     tempos_: HashMap<Ctx, Vec<Vec<Mpb>>>,
+    controllers: HashMap<Ctx, Vec<Vec<Controller>>>,
+    pedal: HashMap<u8, bool>,
     bindings: HashMap<Ctx, HashMap<Ident, Exp>>,
     instruments: HashMap<Prog, Vec<u8>>,
     timeline: Vec<(u64, Ctx)>,
@@ -62,6 +72,10 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         let exps = Vec::new();
+
+        let mut controllers = HashMap::<Ctx, Vec<Vec<Controller>>>::new();
+        let controllers = vec![Vec::<Controller>::new()];
+        // controllers.insert(Ctx::Root, vec![controller_vec]);
 
         Self {
             index_: 1,
@@ -85,6 +99,11 @@ impl Default for State {
             velocities_: HashMap::new(),
             tempo: Mpb::default(),
             tempos_: HashMap::default(),
+            controllers: HashMap::from_iter(vec![(
+                Ctx::Root,
+                vec![vec![HashSet::from_iter(vec![(0x40, 0)])]],
+            )]),
+            pedal: HashMap::from_iter(vec![(0, false)]),
             bindings: HashMap::new(),
             instruments: HashMap::new(),
             timeline: Vec::new(),
@@ -134,7 +153,7 @@ impl State {
             ctx
         };
 
-        info(format!("{}APPEND CHILD {parent:?} -> {ctx:?}", color!(),));
+        // info(format!("{}APPEND CHILD {parent:?} -> {ctx:?}", color!(),));
 
         self.set_scope(ctx, Scope::None);
         self.programs_.insert(ctx, Vec::new());
@@ -144,6 +163,7 @@ impl State {
         self.lengths_.insert(ctx, Vec::new());
         self.velocities_.insert(ctx, Vec::new());
         self.tempos_.insert(ctx, Vec::new());
+        self.controllers.insert(ctx, Vec::new());
         self.bindings.insert(ctx, HashMap::new());
 
         while let Some((event, thunk)) = self.thunk_stack.pop() {
@@ -151,6 +171,9 @@ impl State {
         }
 
         // graph(self, Ctx::Root, 2);
+
+        // print_state(self, ctx);
+        // pause();
 
         ctx
     }
@@ -177,7 +200,7 @@ impl State {
         self.peeked.clear();
         let exps_ = std::mem::replace(&mut self.exps, exps);
         self.index_ = index;
-        print_stacks(self);
+        // print_stacks(self);
         // pause();
         // dbg!(self.len());
         (exps_, index_)
@@ -258,8 +281,8 @@ impl State {
         self.programs_.get(&ctx).cloned()
     }
 
-    pub fn programs_mut(&mut self, ctx: Ctx) -> Option<&mut Vec<Vec<Prog>>> {
-        self.programs_.get_mut(&ctx)
+    pub fn programs_mut(&mut self, ctx: Ctx) -> &mut Vec<Vec<Prog>> {
+        self.programs_.entry(ctx).or_default()
     }
 
     pub fn add_program(&mut self, ctx: Ctx, program: Prog) {
@@ -274,12 +297,21 @@ impl State {
     }
 
     #[inline(always)]
-    pub fn add_programs(&mut self, ctx: Ctx, programs: Vec<Prog>) {
-        if let Some(programs_) = self.programs_.get_mut(&ctx) {
-            programs_.push(programs);
-        } else {
-            self.programs_.insert(ctx, vec![programs]);
-        }
+    pub fn add_programs(&mut self, from: Ctx, to: Ctx) {
+        let programs = std::mem::take(self.programs_mut(from));
+        let idx = (self.pcs(to).unwrap_or_default().len().max(1) - 1)
+            .min(self.programs(to).unwrap_or_default().len());
+        // c! {{
+        //     dbg!(idx);
+        // }}
+
+        self.programs_mut(to).splice(idx.., programs);
+        // let idx = self.pcs(ctx).unwrap_or_default().len().max(1) - 1;
+        // if let Some(programs_) = self.programs_.get_mut(&ctx) {
+        //     programs_.insert(idx, programs);
+        // } else {
+        //     self.programs_.insert(ctx, vec![programs]);
+        // }
     }
 
     pub fn instruments(&self) -> &HashMap<Prog, Vec<u8>> {
@@ -295,8 +327,8 @@ impl State {
         self.registers_.get(&ctx).cloned()
     }
 
-    pub fn registers_mut(&mut self, ctx: Ctx) -> Option<&mut Vec<Vec<Register>>> {
-        self.registers_.get_mut(&ctx)
+    pub fn registers_mut(&mut self, ctx: Ctx) -> &mut Vec<Vec<Register>> {
+        self.registers_.entry(ctx).or_default()
     }
 
     pub fn add_register(&mut self, ctx: Ctx, register: Register) {
@@ -309,12 +341,23 @@ impl State {
     }
 
     #[inline(always)]
-    pub fn add_registers(&mut self, ctx: Ctx, registers: Vec<Register>) {
-        if let Some(registers_) = self.registers_.get_mut(&ctx) {
-            registers_.push(registers);
-        } else {
-            self.registers_.insert(ctx, vec![registers]);
-        }
+    pub fn add_registers(&mut self, from: Ctx, to: Ctx) {
+        let registers = std::mem::take(self.registers_mut(from));
+        let idx = (self.pcs(to).unwrap_or_default().len().max(1) - 1)
+            .min(self.registers(to).unwrap_or_default().len());
+        // c! {{
+        //     dbg!(idx);
+        // }}
+
+        self.registers_mut(to).splice(idx.., registers);
+
+        // let len = self.pcs(ctx).unwrap_or_default().len();
+        // if let Some(registers_) = self.registers_.get_mut(&ctx) {
+        //     registers_.resize(len, registers);
+        //     // registers_.push(registers);
+        // } else {
+        //     self.registers_.insert(ctx, vec![registers]);
+        // }
     }
 
     #[inline(always)]
@@ -322,8 +365,8 @@ impl State {
         self.pcs_.get(&ctx).cloned()
     }
 
-    pub fn pcs_mut(&mut self, ctx: Ctx) -> Option<&mut Vec<Vec<Pc>>> {
-        self.pcs_.get_mut(&ctx)
+    pub fn pcs_mut(&mut self, ctx: Ctx) -> &mut Vec<Vec<Pc>> {
+        self.pcs_.entry(ctx).or_default()
     }
 
     pub fn add_pc(&mut self, ctx: Ctx, pc: Pc) {
@@ -340,12 +383,13 @@ impl State {
     }
 
     #[inline(always)]
-    pub fn add_pcs(&mut self, ctx: Ctx, pcs: Vec<Pc>) {
-        if let Some(pcs_) = self.pcs_.get_mut(&ctx) {
-            pcs_.push(pcs);
-        } else {
-            self.pcs_.insert(ctx, vec![pcs]);
-        }
+    pub fn hoist_pcs(&mut self, from: Ctx, to: Ctx) {
+        let pcs = std::mem::take(self.pcs_mut(from));
+
+        self.pcs_mut(to).extend(pcs);
+        // let idx = self.pcs(to).unwrap_or_default().len().max(1) - 1;
+        // let pcs__ = self.pcs_mut(to);
+        // pcs__.get_mut(idx).and_then(|pcs_| {*pcs_ = pcs; Some(()) });
     }
 
     #[inline(always)]
@@ -353,8 +397,8 @@ impl State {
         self.velocities_.get(&ctx).cloned()
     }
 
-    pub fn velocities_mut(&mut self, ctx: Ctx) -> Option<&mut Vec<Vec<Velocity>>> {
-        self.velocities_.get_mut(&ctx)
+    pub fn velocities_mut(&mut self, ctx: Ctx) -> &mut Vec<Vec<Velocity>> {
+        self.velocities_.entry(ctx).or_default()
     }
 
     pub fn velocity(&self) -> Option<Vec<Velocity>> {
@@ -366,14 +410,18 @@ impl State {
     }
 
     #[inline(always)]
-    pub fn add_velocities(&mut self, ctx: Ctx, velocities: Vec<Velocity>) {
+    pub fn add_velocities(&mut self, from: Ctx, to: Ctx) {
         // dbg!(&velocities);
         // trace(TextStyle::IntenseBoldCyan);
-        if let Some(velocities_) = self.velocities_.get_mut(&ctx) {
-            velocities_.push(velocities.clone());
-        } else {
-            self.velocities_.insert(ctx, vec![velocities.clone()]);
-        }
+        let velocities = std::mem::take(self.velocities_mut(from));
+        let idx = (self.pcs(to).unwrap_or_default().len().max(1) - 1)
+            .min(self.velocities(to).unwrap_or_default().len());
+        // c! {{
+        //     dbg!(idx);
+        // }}
+        // pause();
+
+        self.velocities_mut(to).splice(idx.., velocities);
 
         // misc(state_str(self, ctx));
     }
@@ -386,38 +434,82 @@ impl State {
     ) where
         Data: From<T>,
     {
-        log(format!(
-            "{}ADD {ts:?} TO {ctx:?} {:?}\n",
-            color!(),
-            self.scope(ctx)
-        ));
-        // trace(TextStyle::BoldPurple);
-        // pause();
+        // log(format!(
+        //     "{}ADD {ts:?} TO {ctx:?} {:?}\n",
+        //     color!(),
+        //     self.scope(ctx)
+        // ));
+
+        // c! {{
+        //     print_state(self, ctx);
+        //     pause();
+        // }}
 
         match self.scope(ctx) {
             Scope::Sequence => match <T as Into<Data>>::into(T::default()) {
                 Data::Pc(_) => {
-                    self.add_pcs(ctx, convert_vec::<Data, Pc>(convert_vec::<T, Data>(ts)))
+                    self.pcs_mut(ctx)
+                        .push(convert_vec::<Data, Pc>(convert_vec::<T, Data>(ts)));
+                    // self.add_pcs(ctx, convert_vec::<Data, Pc>(convert_vec::<T, Data>(ts)))
                 }
                 Data::Length(_) => {
-                    self.add_lengths(ctx, convert_vec::<Data, Length>(convert_vec::<T, Data>(ts)));
+                    self.lengths_mut(ctx)
+                        .push(convert_vec::<Data, Length>(convert_vec::<T, Data>(ts)));
+                    // self.add_lengths(ctx, convert_vec::<Data, Length>(convert_vec::<T, Data>(ts)));
                 }
-                Data::Velocity(_) => self.add_velocities(
-                    ctx,
-                    convert_vec::<Data, Velocity>(convert_vec::<T, Data>(ts)),
-                ),
+                Data::Velocity(_) => {
+                    // c! {{
+                    //     print_state(self, ctx);
+                    //     pause();
+                    // }}
+                    self.velocities_mut(ctx)
+                        .push(convert_vec::<Data, Velocity>(convert_vec::<T, Data>(ts)));
+                    // c! {{
+                    //     print_state(self, ctx);
+                    //     pause();
+                    // }}
+                    //     self.add_velocities(
+                    //     ctx,
+                    //     convert_vec::<Data, Velocity>(convert_vec::<T, Data>(ts)),
+                    // )
+                }
+                // self.add_velocities(
+                //     ctx,
+                //     convert_vec::<Data, Velocity>(convert_vec::<T, Data>(ts)),
+                // ),
                 Data::Tempo(_) => {
-                    self.add_tempos(ctx, convert_vec::<Data, Tempo>(convert_vec::<T, Data>(ts)))
+                    self.tempos_mut(ctx)
+                        .push(convert_vec::<Data, Tempo>(convert_vec::<T, Data>(ts)));
+
+                    // self.add_tempos(ctx, convert_vec::<Data, Tempo>(convert_vec::<T, Data>(ts)))
                 }
-                Data::Register(_) => self.add_registers(
-                    ctx,
-                    convert_vec::<Data, Register>(convert_vec::<T, Data>(ts)),
-                ),
+                Data::Register(_) => {
+                    self.registers_mut(ctx)
+                        .push(convert_vec::<Data, Register>(convert_vec::<T, Data>(ts)));
+
+                    //     self.add_registers(
+                    //     ctx,
+                    //     convert_vec::<Data, Register>(convert_vec::<T, Data>(ts)),
+                    // )
+                }
                 Data::Interpolation(_) => todo!(),
                 Data::Program(_) => {
-                    self.add_programs(ctx, convert_vec::<Data, Prog>(convert_vec::<T, Data>(ts)))
+                    self.programs_mut(ctx)
+                        .push(convert_vec::<Data, Prog>(convert_vec::<T, Data>(ts)));
+
+                    // self.add_programs(ctx, convert_vec::<Data, Prog>(convert_vec::<T, Data>(ts)))
                 }
                 Data::None => todo!(),
+                Data::Controller(_) => {
+                    // dbg!(ts.len());
+                    self.controllers_mut(ctx)
+                        .push(convert_vec::<Data, Controller>(convert_vec::<T, Data>(ts)));
+
+                    // self.add_controllers(
+                    //     ctx,
+                    //     convert_vec::<Data, Controller>(convert_vec::<T, Data>(ts)),
+                    // );
+                }
             },
             Scope::Stack => self.extend(ctx, vec![ts]),
             Scope::Set => todo!(),
@@ -428,6 +520,8 @@ impl State {
                 todo!()
             }
         }
+        // dbg!();
+        // print_state(self, ctx);
         // misc(state_str(self, ctx));
     }
 
@@ -466,23 +560,19 @@ impl State {
             Data::Length(_) => {
                 let ts: Vec<Vec<Length>> = ts
                     .into_iter()
-                    .map(|ts| {
-                        ts.into_iter()
-                            .map(|t| <T as Into<Data>>::into(t))
-                            .map(|d| <Length as From<Data>>::from(d))
-                            .collect()
-                    })
+                    .map(convert_vec::<T, Data>)
+                    .map(convert_vec::<Data, Length>)
                     .collect();
+
                 if let Some(ts_) = self.lengths_.get_mut(&ctx) {
+                    // eprintln!("{}{ctx:?} ts_: {ts_:?}", color!());
+                    // pause();
                     if ts_.is_empty() {
                         *ts_ = ts;
                     } else {
-                        ts.iter()
-                            .cloned()
-                            .zip(ts_.iter_mut())
-                            .for_each(|(from, to)| {
-                                to.extend(from);
-                            });
+                        ts_.iter_mut().zip(ts.iter().cloned()).for_each(|(t_, t)| {
+                            t_.extend(t);
+                        });
                     }
                 }
                 // print_notes(ctx, self);
@@ -576,8 +666,35 @@ impl State {
                 // misc(state_str(self, ctx));
                 // pause();
             }
-
             Data::None => todo!(),
+            Data::Controller(_) => {
+                let ts: Vec<_> = ts
+                    .into_iter()
+                    .map(|ts| {
+                        ts.into_iter()
+                            .map(|t| <T as Into<Data>>::into(t))
+                            .map(|d| <Controller as From<Data>>::from(d))
+                            .collect()
+                    })
+                    .collect();
+                // dbg!(&ts);
+                // pause();
+                let ts_ = self.controllers_mut(ctx);
+                if ts_.is_empty() {
+                    *ts_ = ts;
+                } else {
+                    ts.iter()
+                        .cloned()
+                        .zip(ts_.iter_mut())
+                        .for_each(|(from, to)| {
+                            to.extend(from);
+                        });
+                }
+
+                // dbg!();
+                // print_state(self, ctx);
+                // pause();
+            }
         }
 
         // dbg!();
@@ -595,8 +712,8 @@ impl State {
         self.lengths_.get(&ctx).cloned()
     }
 
-    pub fn lengths_mut(&mut self, ctx: Ctx) -> Option<&mut Vec<Vec<Length>>> {
-        self.lengths_.get_mut(&ctx)
+    pub fn lengths_mut(&mut self, ctx: Ctx) -> &mut Vec<Vec<Length>> {
+        self.lengths_.entry(ctx).or_insert(Vec::new())
     }
 
     pub fn add_length(&mut self, ctx: Ctx, length: Length) {
@@ -613,13 +730,34 @@ impl State {
         }
     }
 
-    pub fn add_lengths(&mut self, ctx: Ctx, lengths: Vec<Length>) {
+    pub fn hoist_lengths(&mut self, from: Ctx, to: Ctx) {
         // eprintln!("{}ADD LENGTHS: {lengths:?}", color!());
-        if let Some(lengths_) = self.lengths_.get_mut(&ctx) {
-            lengths_.push(lengths);
-        } else {
-            self.lengths_.insert(ctx, vec![lengths]);
-        }
+        // c! {{
+        //     print_state(self, to);
+        //     print_state(self, from);
+        // }}
+        // pause();
+        let lengths = std::mem::take(self.lengths_mut(from));
+        let idx = (self.pcs(to).unwrap_or_default().len().max(1) - 1)
+            .min(self.lengths(to).unwrap_or_default().len());
+        // c! {{
+        //     dbg!(idx);
+        // }}
+        // pause();
+
+        self.lengths_mut(to).splice(idx.., lengths);
+
+        // lengths_.get_mut(idx).and_then(|lens| {
+        //     *lens = lengths;
+        //     Some(())
+        // });
+
+        // c! {{
+        //     dbg!();
+        //     print_state(self, to);
+        //     print_state(self, from);
+        // }}
+        // pause();
         // misc(state_str(self, ctx));
         // print_notes(ctx, self);
     }
@@ -635,20 +773,24 @@ impl State {
         self.tempos_.get(&ctx).cloned()
     }
 
-    pub fn tempos_mut(&mut self, ctx: Ctx) -> Option<&mut Vec<Vec<Tempo>>> {
-        self.tempos_.get_mut(&ctx)
+    pub fn tempos_mut(&mut self, ctx: Ctx) -> &mut Vec<Vec<Tempo>> {
+        self.tempos_.entry(ctx).or_insert(Vec::new())
     }
 
     pub fn set_bpm(&mut self, bpm: Absolute) {
         let mpb = match bpm {
-            Absolute::Float(float) => Ratio::<u64>::from_f64(60_000_000. / float).unwrap(),
-            Absolute::UInt(uint) => Ratio::<u64>::from_f64(60_000_000. / uint as f64).unwrap(),
+            Absolute::Float(float) => {
+                Ratio::<BigInt>::from_integer(BigInt::from_f64(60_000_000. / float).unwrap())
+            }
+            Absolute::UInt(uint) => {
+                Ratio::<BigInt>::from_integer(BigInt::from_f64(60_000_000. / uint as f64).unwrap())
+            }
         };
         self.tempo = Mpb(mpb);
     }
 
-    pub fn tempo(&self) -> Tempo {
-        self.tempo.clone()
+    pub fn tempo(&self) -> &Tempo {
+        &self.tempo
     }
 
     pub fn set_tempo(&mut self, tempo: Tempo) {
@@ -669,22 +811,76 @@ impl State {
         }
     }
 
-    pub fn add_tempos(&mut self, ctx: Ctx, tempos: Vec<Tempo>) {
-        if let Some(tempos_) = self.tempos_.get_mut(&ctx) {
-            tempos_.push(tempos);
-        } else {
-            self.tempos_.insert(
-                ctx,
-                vec![
-                    tempos
-                        .into_iter()
-                        .map(|tempo| {
-                            Mpb(tempo.0.clone() - tempo.0 % Ratio::<u64>::from_u64(128).unwrap())
-                        })
-                        .collect(),
-                ],
-            );
-        }
+    pub fn add_tempos(&mut self, from: Ctx, to: Ctx) {
+        let tempos = std::mem::take(self.tempos_mut(from));
+        let idx = (self.pcs(to).unwrap_or_default().len().max(1) - 1)
+            .min(self.tempos(to).unwrap_or_default().len());
+        // c! {{
+        //     dbg!(idx);
+        // }}
+
+        self.tempos_mut(to).splice(idx.., tempos);
+        // let len = self.pcs(ctx).unwrap_or_default().len();
+        // if let Some(tempos_) = self.tempos_.get_mut(&ctx) {
+        //     tempos_.resize(len, tempos);
+        //     // tempos_.get_mut(idx).and_then(|tmps| { *tmps = tempos; Some(()) });
+        // } else {
+        //     self.tempos_.insert(
+        //         ctx,
+        //         vec![
+        //             tempos
+        //                 .into_iter()
+        //                 .map(|tempo| {
+        //                     Mpb(tempo.0.clone()
+        //                         - tempo.0
+        //                             % Ratio::<BigInt>::from_integer(BigInt::from_u64(128).unwrap()))
+        //                 })
+        //                 .collect(),
+        //         ],
+        //     );
+        // }
+    }
+
+    pub fn controllers(&self, ctx: Ctx) -> Option<Vec<Vec<Controller>>> {
+        self.controllers.get(&ctx).cloned()
+    }
+
+    pub fn controllers_mut(&mut self, ctx: Ctx) -> &mut Vec<Vec<Controller>> {
+        let ped = self.pedal(0);
+        let controllers = self.controllers.entry(ctx).or_insert_with(|| match ped {
+            true => vec![vec![HashSet::from_iter(vec![(PEDAL, 127)])]],
+            false => vec![vec![HashSet::from_iter(vec![(PEDAL, 0)])]],
+        });
+        // .or_insert(controller_vec_vec);
+        // dbg!(&controllers);
+        controllers
+    }
+
+    pub fn add_controllers(&mut self, from: Ctx, to: Ctx) {
+        // eprint!("{}", color!());
+        // dbg!();
+        // print_state(self, ctx);
+
+        let controllers = std::mem::take(self.controllers_mut(from));
+        let idx = (self.pcs(to).unwrap_or_default().len().max(1) - 1)
+            .min(self.controllers(to).unwrap_or_default().len());
+        // c! {{
+        //     dbg!(idx);
+        // }}
+
+        self.controllers_mut(to).splice(idx.., controllers);
+
+        // let len = self.pcs(ctx).unwrap_or_default().len();
+        // if let Some(controllers_) = self.controllers.get_mut(&ctx) {
+        //     controllers_.resize(len, controllers);
+        // controllers_.get_mut(idx).and_then(|ctls| {
+        //     *ctls = controllers;
+        //     Some(())
+        // });
+
+        // eprint!("{}", color!());
+        // print_state(self, ctx);
+        // pause();
     }
 
     pub fn bindings(&self, ctx: Ctx) -> HashMap<Ident, Exp> {
@@ -743,8 +939,8 @@ impl State {
         self.thunks.get(&ctx).cloned().unwrap_or_default()
     }
 
-    pub fn thunks_mut(&mut self, ctx: Ctx) -> Option<&mut HashMap<LifeCycleEvent, Vec<Thunk>>> {
-        self.thunks.get_mut(&ctx)
+    pub fn thunks_mut(&mut self, ctx: Ctx) -> &mut HashMap<LifeCycleEvent, Vec<Thunk>> {
+        self.thunks.entry(ctx).or_insert(HashMap::new())
     }
 
     pub fn push_thunk(&mut self, event: LifeCycleEvent, thunk: Thunk) {
@@ -752,7 +948,12 @@ impl State {
     }
 
     pub fn add_thunk(&mut self, ctx: Ctx, life_cycle_event: LifeCycleEvent, thunk: Thunk) {
-        misc(format!("{:?}", self.thunks(ctx)));
+        // c! {{
+        //     eprintln!("ADD THUNK: {ctx:?} {life_cycle_event:?}");
+        //     pause();
+        // }}
+        // pause();
+        // misc(format!("{:?}", self.thunks(ctx)));
         // pause();
         if let Some(thunks) = self.thunks.get_mut(&ctx) {
             if let Some(event) = thunks.get_mut(&life_cycle_event) {
@@ -769,43 +970,118 @@ impl State {
                 )]),
             );
         }
-        misc(format!("{:?}", self.thunks(ctx)));
+        // misc(format!("{:?}", self.thunks(ctx)));
         // pause();
     }
 
-    pub fn call_thunks(&mut self, ctx: Ctx, life_cycle_event: LifeCycleEvent) {
-        let thunk_map = self.thunks.get(&ctx).cloned().unwrap_or_default();
-        if thunk_map.is_empty() {
-            return;
+    pub fn call_thunks(&mut self, from: Ctx, to: Ctx, life_cycle_event: LifeCycleEvent) {
+        // eprintln!(
+        //     "CALL THUNKS {life_cycle_event:?} from {from:?} to {to:?}"
+        // );
+
+        // c! {{
+        //     print_state(self, to);
+        //     // pause();
+        // }}
+
+        match life_cycle_event {
+            LifeCycleEvent::PreComposition => {
+                let thunks = self
+                    .thunks_mut(from)
+                    .entry(LifeCycleEvent::PreComposition)
+                    .or_default()
+                    .clone();
+                thunks.into_iter().for_each(|thunk| {
+                    thunk.call(to, self);
+                });
+
+                self.thunks_mut(from)
+                    .entry(LifeCycleEvent::PreComposition)
+                    .or_default()
+                    .clear();
+
+                self.thunks_mut(from)
+                    .entry(LifeCycleEvent::Composition)
+                    .or_default()
+                    .clear();
+            }
+            LifeCycleEvent::Composition => {
+                let thunks = self
+                    .thunks_mut(from)
+                    .entry(LifeCycleEvent::Composition)
+                    .or_default()
+                    .clone();
+                thunks.into_iter().for_each(|thunk| {
+                    thunk.call(to, self);
+                });
+
+                self.thunks_mut(from)
+                    .entry(LifeCycleEvent::PreComposition)
+                    .or_default()
+                    .clear();
+
+                self.thunks_mut(from)
+                    .entry(LifeCycleEvent::Composition)
+                    .or_default()
+                    .clear();
+            }
+
+            _ => {
+                let thunk_map = self.thunks_mut(from);
+                let thunks = thunk_map
+                    .get(&life_cycle_event)
+                    .cloned()
+                    .unwrap_or_default();
+                thunks.iter().cloned().for_each(|mut thunk| {
+                    thunk.call(to, self);
+                });
+            }
         }
-        eprintln!("{}CALL THUNKS: {ctx:?} {:?}", color!(), self.scope(ctx));
-        // pause();
-        let thunks = thunk_map
-            .get(&life_cycle_event)
-            .cloned()
-            .unwrap_or_default();
-        // thunks.iter().for_each(|thunk| eprintln!("{thunk:?}"));
-        thunks.iter().cloned().for_each(|mut thunk| {
-            thunk.call(ctx, self);
-            // match thunk
-            //     .0
-            //     .first()
-            //     .cloned()
-            //     .unwrap_or_default()
-            //     .first()
-            //     .cloned()
-            //     .unwrap_or_default()
-            // {
-            //     Data::Pc(_) => thunk.call::<Pc>(ctx, self),
-            //     Data::Length(_) => thunk.call::<Length>(ctx, self),
-            //     Data::Velocity(_) => thunk.call::<Velocity>(ctx, self),
-            //     Data::Tempo(_) => thunk.call::<Mpb>(ctx, self),
-            //     Data::Register(_) => thunk.call::<Register>(ctx, self),
-            //     Data::Interpolation(_) => todo!(),
-            //     Data::None => todo!(),
-            //     Data::Program(prog) => todo!(),
-            // }
-        });
+
+        // c! {{
+        //     print_state(self, to);
+        //     pause();
+        // }}
+    }
+
+    // pub fn call_thunks(&mut self, from: Ctx, to: Ctx, life_cycle_event: LifeCycleEvent) {
+    //     // eprintln!(
+    //     //     "CALL THUNKS {life_cycle_event:?} from {from:?} to {to:?}"
+    //     // );
+    //     // pause();
+
+    //     match life_cycle_event {
+    //         LifeCycleEvent::Composition => {
+    //             let thunk_map = self.thunks.entry(from).or_default();
+    //             let thunks = thunk_map.entry(LifeCycleEvent::Composition).or_default();
+    //             thunks.iter_mut().for_each(|thunk| {
+    //                 thunk.call(to, self);
+    //             });
+    //         }
+    //         _ => {
+    //             let thunk_map = self.thunks.get(&from).cloned().unwrap_or_default();
+    //             let thunks = thunk_map
+    //                 .get(&life_cycle_event)
+    //                 .cloned()
+    //                 .unwrap_or_default();
+    //             thunks.iter().cloned().for_each(|mut thunk| {
+    //                 thunk.call(to, self);
+    //             });
+    //         }
+    //     }
+
+    //     // thunks.iter().for_each(|thunk| eprintln!("{thunk:?}"));
+    // }
+
+    pub fn clear_thunks(&mut self, ctx: Ctx, life_cycle_event: LifeCycleEvent) {
+        self.thunks
+            .entry(ctx)
+            .or_default()
+            .get_mut(&life_cycle_event)
+            .and_then(|thunks| {
+                thunks.clear();
+                Some(())
+            });
     }
 
     pub fn push_back(&mut self, exp: Exp) {
@@ -818,6 +1094,7 @@ impl State {
         self.stack.push(exp);
     }
 
+    /// Load expression from stack
     pub fn load(&mut self) -> Option<Exp> {
         self.stack.pop()
     }
@@ -863,27 +1140,39 @@ impl State {
     }
 
     pub fn cycle_fill(&mut self, ctx: Ctx, len: Length) {
-        color!();
-        info(format!(
-            "{}CYCLE FILL {ctx:?} LEN: {}",
+        c! {{
+            eprintln!(
+            "{}CYCLE FILL {ctx:?} LEN: {:?}",
             color!(),
-            len.as_u64()
-        ));
-        print_states(self, ctx);
+            len
+        );
+        }}
+
+        // dbg!();
+        // print_state(self, ctx);
+        // print_states(self, ctx);
         // misc(state_str(self, ctx));
         // pause();
 
         let children_len = self.children(ctx).len();
-        if children_len > 0 {
+        if children_len > 0 && len.as_ratio() > BigRational::ZERO {
+            // dbg!();
             let clone = self.children(ctx);
             let mut cycle = clone.iter().cloned().cycle();
-            while self.get_ctx_length(ctx) <= len {
+            while self.get_ctx_length(ctx) < len {
+                // dbg!(ctx, self.get_ctx_length(ctx).as_u64(), len.as_u64());
+                // pause();
                 self.children_mut(ctx)
                     .unwrap()
                     .extend(cycle.by_ref().take(1));
             }
+            // dbg!();
         } else {
+            // dbg!();
             let len_clone = self.lengths(ctx).unwrap_or_default();
+            if len_clone.len() == 0 {
+                return;
+            }
             let mut len_cycle = len_clone.iter().cloned().cycle();
             let prog_clone = self.programs(ctx).unwrap_or_default();
             let mut prog_cycle = prog_clone.iter().cloned().cycle();
@@ -895,33 +1184,78 @@ impl State {
             let mut vel_cycle = vel_clone.iter().cloned().cycle();
             let temp_clone = self.tempos(ctx).unwrap_or_default();
             let mut temp_cycle = temp_clone.iter().cloned().cycle();
+            let controllers_clone = self.controllers(ctx).unwrap_or_default();
+            // dbg!(&controllers_clone.len());
+            let mut controllers_cycle = controllers_clone.iter().cloned().cycle();
+            // print_state(self, self.parent(ctx));
+            // print_state(self, ctx);
+            // pause();
+            let mut ctx_len = self.get_ctx_length(ctx);
 
-            while self.get_ctx_length(ctx) < len {
-                eprintln!(
-                    "{}T:{}:{}",
-                    color!(),
-                    self.get_ctx_length(ctx).as_u64(),
-                    len.as_u64()
-                );
-                print_state(self, ctx);
-                // pause();
+            while ctx_len.as_ratio() < len.as_ratio() {
+                c!{{
+                    eprintln!("ctx_len: {} len: {:?} rate: {:?}",
+                        ctx_len.as_ratio().to_f64().unwrap_or_default(),
+                        len.as_ratio().to_f64().unwrap_or_default(),
+                        (ctx_len.clone().as_ratio() / len.clone().as_ratio()).to_f64().unwrap_or_default());
+                }}
+                let len_ = len_cycle
+                    .by_ref()
+                    .next()
+                    .unwrap_or_default()
+                    .iter()
+                    .cloned()
+                    .min()
+                    .unwrap_or_default();
+                let length = if ctx_len.clone() + len_.clone() <= len {
+                    len_.clone()
+                } else {
+                    len.clone() - ctx_len.clone()
+                };
 
-                self.add::<Length>(ctx, len_cycle.by_ref().next().unwrap_or_default());
-                self.add::<Prog>(ctx, prog_cycle.by_ref().next().unwrap_or_default());
-                self.add::<Register>(ctx, reg_cycle.by_ref().next().unwrap_or_default());
-                self.add::<Pc>(ctx, pc_cycle.by_ref().next().unwrap_or_default());
-                self.add::<Velocity>(ctx, vel_cycle.by_ref().next().unwrap_or_default());
-                self.add::<Tempo>(ctx, temp_cycle.by_ref().next().unwrap_or_default());
+                c! {{
+                    eprintln!("length: {length:?}");
+                }}
+
+                self.add::<Length>(ctx, vec![length.clone()]);
+                ctx_len = self.get_ctx_length(ctx);
             }
-        }
-        print_states(self, ctx);
+            // }
 
-        // pause();
-        // misc(format!("{}{}", color!(), state_str(self, ctx)));
-        // pause();
-        // eprint!("{}", color!());
-        // dbg!();
-        // misc(state_str(self, ctx));
+            let length_len = self.lengths(ctx).unwrap_or_default().len();
+
+            c! {{
+                eprintln!("length_len: {length_len}");
+            }}
+
+            self.programs_mut(ctx)
+                .extend(prog_cycle.take(length_len.max(prog_clone.len()) - prog_clone.len()));
+
+            self.registers_mut(ctx)
+                .extend(reg_cycle.take(length_len.max(reg_clone.len()) - reg_clone.len()));
+            self.pcs_mut(ctx)
+                .extend(pc_cycle.take(length_len.max(pc_clone.len()) - pc_clone.len()));
+
+            self.velocities_mut(ctx)
+                .extend(vel_cycle.take(length_len.max(vel_clone.len()) - vel_clone.len()));
+            self.tempos_mut(ctx)
+                .extend(temp_cycle.take(length_len.max(temp_clone.len()) - temp_clone.len()));
+            let len = self.controllers.borrow().len();
+            self.controllers_mut(ctx).extend(
+                controllers_cycle
+                    .take(length_len.max(controllers_clone.len()) - controllers_clone.len()),
+            );
+            // self.add::<HashMap<u8, u8>>(
+            //     ctx,
+            //     controllers_cycle.by_ref().next().unwrap_or_default(),
+            // );
+
+            // dbg!();
+        }
+
+        c! {{
+            print_state(self, ctx);
+        }}
     }
 
     pub fn get_last_mut<'a, T>(&'a mut self, ctx: Ctx) -> Option<&'a mut T>
@@ -929,7 +1263,7 @@ impl State {
         T: Interpolant,
     {
         let mut ts = T::get_vec_mut(self, ctx);
-        ts?.last_mut()?.last_mut()
+        ts.last_mut().and_then(|last| last.last_mut())
     }
 
     pub fn get<T: Clone + Default + Debug + Into<Data> + From<Data> + ToString>(
@@ -956,6 +1290,10 @@ impl State {
             Data::Program(prog) => self.get_::<Prog>(ctx),
             Data::Interpolation(_) => todo!(),
             Data::None => todo!(),
+            Data::Controller(_) => {
+                // dbg!();
+                self.get_::<Controller>(ctx)
+            }
         };
 
         if matches!(&res.as_slice(), &[Data::None]) {
@@ -992,39 +1330,22 @@ impl State {
                         .unwrap_or_default()
                         .last()
                         .cloned()
-                        .and_then(|ts| {
-                            // misc(state_str(self, ctx_));
-                            // self.length = Some(ts.clone());
-                            Some(convert_vec::<Length, Data>(ts))
-                        }),
-                    // .or(self.length.clone().and_then(|ts| {
-                    //     // self.length = Some(ts.clone());
-                    //     Some(convert_vec::<Length, Data>(ts))
-                    // })
+                        .and_then(|ts| Some(convert_vec::<Length, Data>(ts))),
                     Data::Velocity(_) => self
                         .velocities(ctx_)
                         .unwrap_or_default()
                         .last()
                         .cloned()
-                        .and_then(
-                            |ts| {
-                                // self.velocity = Some(ts.clone());
-                                Some(convert_vec::<Velocity, Data>(ts))
-                            }, // )
-                               // .or(self.velocity.clone().and_then(|ts| {
-                               //     self.velocity = Some(ts.clone());
-                               //     Some(convert_vec::<Velocity, Data>(ts))
-                               // })
-                        ),
-                    Data::Tempo(_) =>
-                    // Some(vec![Data::from(self.tempo)]),
-                    {
-                        self.tempos(ctx_)
-                            .unwrap_or_default()
-                            .last()
-                            .cloned()
-                            .and_then(|ts| Some(convert_vec::<Tempo, Data>(ts)))
-                    }
+                        .and_then(|ts| {
+                            // self.velocity = Some(ts.clone());
+                            Some(convert_vec::<Velocity, Data>(ts))
+                        }),
+                    Data::Tempo(_) => self
+                        .tempos(ctx_)
+                        .unwrap_or_default()
+                        .last()
+                        .cloned()
+                        .and_then(|ts| Some(convert_vec::<Tempo, Data>(ts))),
                     Data::Register(_) => self
                         .registers(ctx_)
                         .unwrap_or_default()
@@ -1048,68 +1369,90 @@ impl State {
                         .unwrap_or_default()
                         .last()
                         .cloned()
-                        .and_then(
-                            |ts| {
-                                // self.program = Some(ts.clone());
-                                Some(convert_vec::<Prog, Data>(ts))
-                            }, // )
-                               // .or(self.program.clone().and_then(|ts| {
-                               //     self.program = Some(ts.clone());
-                               //     Some(convert_vec::<Prog, Data>(ts))
-                               // })
-                        ),
+                        .and_then(|ts| {
+                            // self.program = Some(ts.clone());
+                            Some(convert_vec::<Prog, Data>(ts))
+                        }),
                     Data::None => todo!(),
+                    Data::Controller(_) => {
+                        Some(convert_vec::<Controller, Data>(vec![
+                            Controller::from_iter(vec![match self.pedal(0) {
+                                true => (PEDAL, 127),
+                                false => (PEDAL, 0),
+                            }]),
+                        ]))
+                        // let len = self.pcs(ctx_).unwrap_or_default().len();
+                        // dbg!();
+                        // print_state(self, ctx_);
+                        // // pause();
+                        // self.controllers(ctx_)
+                        //     .and_then(|ts| {
+                        //         dbg!(&ts);
+                        //         print_state(self, ctx_);
+                        //         // pause();
+                        //         // ts.get(len - 1).cloned().or(ts.last().cloned())
+                        //         ts.last().cloned()
+                        //     })
+                        //     .and_then(|ts| {
+                        //         dbg!(ctx_, &ts);
+                        //         // pause();
+                        //         Some(convert_vec::<Controller, Data>(ts))
+                        //     })
+                    }
                 } {
-                    // misc(state_str(self, ctx_));
                     data = Some(ts);
                 }
             } else {
                 data = match Data::from(default.clone().into()) {
                     Data::Pc(_) => self
                         .pcs_mut(ctx_)
-                        .and_then(|ts| ts.last().cloned())
-                        .and_then(|ts_| {
-                            // self.add(ctx, ts_.clone());
-                            Some(convert_vec::<Pc, Data>(ts_))
-                        }),
+                        .last()
+                        .cloned()
+                        .and_then(|ts_| Some(convert_vec::<Pc, Data>(ts_))),
                     Data::Length(_) => self
                         .lengths_mut(ctx_)
-                        .and_then(|ts| ts.last().cloned())
-                        .and_then(|ts_| {
-                            // self.add(ctx, ts_.clone());
-                            Some(convert_vec::<Length, Data>(ts_))
-                        }),
+                        .last()
+                        .cloned()
+                        .and_then(|ts_| Some(convert_vec::<Length, Data>(ts_))),
                     Data::Velocity(_) => self
                         .velocities_mut(ctx_)
-                        .and_then(|ts| ts.last().cloned())
-                        .and_then(|ts_| {
-                            // self.add(ctx, ts_.clone());
-                            Some(convert_vec::<Velocity, Data>(ts_))
-                        }),
+                        .last()
+                        .cloned()
+                        .and_then(|ts_| Some(convert_vec::<Velocity, Data>(ts_))),
                     Data::Tempo(_) => self
                         .tempos_mut(ctx_)
-                        .and_then(|ts| ts.last().cloned())
-                        .and_then(|ts_| {
-                            // self.add(ctx, ts_.clone());
-                            Some(convert_vec::<Tempo, Data>(ts_))
-                        }),
+                        .last()
+                        .cloned()
+                        .and_then(|ts_| Some(convert_vec::<Tempo, Data>(ts_))),
                     Data::Register(_) => self
                         .registers_mut(ctx_)
-                        .and_then(|ts| ts.last().cloned())
-                        .and_then(|ts_| {
-                            // self.add(ctx, ts_.clone());
-                            Some(convert_vec::<Register, Data>(ts_))
-                        }),
+                        .last()
+                        .cloned()
+                        .and_then(|ts_| Some(convert_vec::<Register, Data>(ts_))),
                     Data::Interpolation(_) => todo!(),
                     Data::Program(_) => self
                         .programs_mut(ctx_)
-                        .and_then(|ts| ts.last().cloned())
-                        .and_then(|ts_| {
-                            // self.add(ctx, ts_.clone());
-                            Some(convert_vec::<Prog, Data>(ts_))
-                        }),
+                        .last()
+                        .cloned()
+                        .and_then(|ts_| Some(convert_vec::<Prog, Data>(ts_))),
+                    Data::Controller(_) => {
+                        // print_state(self, ctx_);
+                        Some(convert_vec::<Controller, Data>(vec![
+                            Controller::from_iter(vec![match self.pedal(0) {
+                                true => (PEDAL, 127),
+                                false => (PEDAL, 0),
+                            }]),
+                        ]))
+                        // self.controllers_mut(ctx_).last().cloned().and_then(|ts_| {
+                        //     dbg!(&ts_);
+                        //     pause();
+                        //     Some(convert_vec::<Controller, Data>(ts_.clone()))
+                        // })
+                    }
                     Data::None => todo!(),
                 };
+
+                // pause();
 
                 // dbg!();
                 // eprintln!("{}{data:?}{ResetColor}", color!());
@@ -1133,7 +1476,13 @@ impl State {
                 Scope::None => todo!(),
             }
         } else {
-            vec![Data::from(default.into())]
+            match Data::from(default.clone().into()) {
+                Data::Controller(_) => {
+                    let mut map = BTreeMap::<u8, u8>::new();
+                    vec![(PEDAL, 0).into()]
+                }
+                _ => vec![Data::from(default.into())],
+            }
         }
     }
 
@@ -1155,7 +1504,7 @@ impl State {
                     .unwrap_or_default()
                     .last()
                     .cloned()
-                    .unwrap_or(vec![Length::default()]),
+                    .unwrap_or(vec![Length::MicroSeconds(self.tempo().0.clone())]),
             )),
             Data::Velocity(_) => convert_vec::<Data, T>(convert_vec::<Velocity, Data>(
                 self.velocities(ctx)
@@ -1187,6 +1536,7 @@ impl State {
                     .unwrap_or(vec![Prog::default()]),
             )),
             Data::None => todo!(),
+            Data::Controller(_) => todo!(),
         }
     }
 
@@ -1204,17 +1554,15 @@ impl State {
 
     // pub fn pad(&mut self, ctx: Ctx, len: usize)
 
-    pub fn pad(&mut self, ctx: Ctx, len: usize) {
-        // eprintln!("{}PAD {ctx:?} LEN: {len}", color!(),);
-        // eprint!("{}", color!());
-        // misc(state_str(self, ctx));
-        //
+    pub fn pad(&mut self, ctx: Ctx) {
+        // eprintln!("{}PAD {ctx:?}", color!(),);
 
-        self.pad_(ctx, Self::programs_mut, Self::programs, len);
-        self.pad_(ctx, Self::velocities_mut, Self::velocities, len);
-        self.pad_(ctx, Self::lengths_mut, Self::lengths, len);
-        self.pad_(ctx, Self::registers_mut, Self::registers, len);
-        self.pad_(ctx, Self::tempos_mut, Self::tempos, len);
+        self.pad_(ctx, Self::programs_mut, Self::programs);
+        self.pad_(ctx, Self::velocities_mut, Self::velocities);
+        self.pad_(ctx, Self::lengths_mut, Self::lengths);
+        self.pad_(ctx, Self::registers_mut, Self::registers);
+        self.pad_(ctx, Self::tempos_mut, Self::tempos);
+        self.pad_(ctx, Self::controllers_mut, Self::controllers);
     }
 
     fn pad_<T: Clone + Default + Debug + Into<Data> + From<Data> + ToString, F, G>(
@@ -1222,254 +1570,91 @@ impl State {
         ctx: Ctx,
         mut f: F,
         g: G,
-        len: usize,
     ) where
-        F: FnMut(&mut Self, Ctx) -> Option<&mut Vec<Vec<T>>>,
+        F: FnMut(&mut Self, Ctx) -> &mut Vec<Vec<T>>,
         G: Fn(&Self, Ctx) -> Option<Vec<Vec<T>>>,
         Data: From<T>,
     {
-        // eprint!("{}", color!());
-        // dbg!();
-        // misc(state_str(self, ctx));
-        let values: Vec<T> = self.get(ctx);
-        // dbg!(ctx, &values);
+        // c! {{
+        //     print_state(self, ctx);
+        //     pause();
+        // }}
+        let mut values: Vec<T> = self.get(ctx);
+        // c! {{
+        //     eprintln!("VALS: {:?}", values);
+        //     pause();
+        // }}
 
-        let (pc_index, ts_len) = (
-            self.pcs(ctx).unwrap_or_default().len().max(1) - 1,
-            g(self, ctx).unwrap_or_default().len(),
-        );
-
-        let pcs = self
+        let pcs = self.pcs(ctx).unwrap_or_default();
+        let pc_index = pcs.len().max(1) - 1;
+        let pcs_ = self
             .pcs(ctx)
             .unwrap_or_default()
             .get(pc_index)
             .cloned()
             .unwrap_or_default();
-        let pcs_len = pcs.len();
-        let ts = g(self, ctx).unwrap_or_default();
+        let pc_count = pcs_.len();
 
-        // dbg!(&pcs, &ts);
-        let ts = ts.get(pc_index).cloned().unwrap_or_default();
-        let t_len = ts.len();
-        if t_len < pcs_len {
-            // dbg!(pc_index, len, t_len);
-            // misc(state_str(self, ctx));
-            let take = pcs_len - t_len;
+        let values_ = g(self, ctx)
+            .unwrap_or_default()
+            .get(pc_index)
+            .cloned()
+            .unwrap_or_default();
 
-            self.add(ctx, values.iter().cloned().cycle().take(take).collect());
+        let len = values_.len();
 
-            // misc(state_str(self, ctx));
+        let last = values.last().cloned().unwrap_or_default();
+        let take = pc_count.max(len) - len;
+        // dbg!(pcs.len(), len, take);
+        if take > 0 {
+            let values = values
+                .iter()
+                .cloned()
+                .chain(from_fn(move || Some(last.clone())))
+                .take(take)
+                .collect();
+            // dbg!(&values);
+            // pause();
+            self.add(ctx, values);
         }
-        // }
 
-        // eprint!("{}", color!());
-        // dbg!();
-        misc(state_str(self, ctx));
-        // pause();
-        // trace(TextStyle::IntenseBoldGreen);
+        // c! {{
+        //     print_state(self, ctx);
+        //     pause();
+        // }}
     }
 
     pub fn hoist(&mut self, from: Ctx, to: Ctx) {
-        // eprintln!("{}HOIST {from:?} {:?}", color!(), self.scope(from));
-        // eprint!("{}", color!());
-        // misc(state_str(self, from));
-        // misc(state_str(self, to));
-        let children = self.children(from);
-        // if children.len() > 0 {
-        // self.fun_name(ctx);
-
-        // children.into_iter().for_each(|ctx| self.hoist(ctx));
-        // }
-
-        // dbg!(parent);
-        let programs = std::mem::take(self.programs_mut(from).unwrap_or(&mut [].to_vec().as_mut()));
-        let pcs = std::mem::take(self.pcs_mut(from).unwrap_or(&mut [].to_vec().as_mut()));
-        let velocities = std::mem::take(
-            self.velocities_mut(from)
-                .unwrap_or(&mut [].to_vec().as_mut()),
-        );
-        // dbg!(&velocities);
-        let registers = std::mem::take(
-            self.registers_mut(from)
-                .unwrap_or(&mut [].to_vec().as_mut()),
-        );
-        let lengths = std::mem::take(self.lengths_mut(from).unwrap_or(&mut [].to_vec().as_mut()));
-        // dbg!(&lengths);
-
-        let tempos = std::mem::take(self.tempos_mut(from).unwrap_or(&mut [].to_vec().as_mut()));
-        // dbg!(&tempos);
-
-        zip(
-            pcs.into_iter(),
-            zip(
-                programs.into_iter(),
-                zip(
-                    registers.into_iter(),
-                    zip(
-                        velocities.into_iter(),
-                        zip(lengths.into_iter(), tempos.into_iter()),
-                    ),
-                ),
-            ),
-        )
-        .for_each(
-            |(pcs, (programs, (registers, (velocities, (lengths, tempos)))))| {
-                self.add_pcs(to, pcs);
-                let index = self.pcs(to).unwrap_or_default().len() - 1;
-                self.registers_mut(to).and_then(|regs| {
-                    if regs.is_empty() {
-                        regs.push(registers);
-                    } else {
-                        regs.get_mut(index)
-                            .and_then(|regs| {
-                                *regs = registers.clone();
-                                Some(())
-                            })
-                            .or_else(|| {
-                                regs.push(registers);
-                                Some(())
-                            });
-                    }
-                    Some(())
-                });
-                self.lengths_mut(to).and_then(|lens| {
-                    // dbg!(&lens);
-                    if lens.is_empty() {
-                        lens.push(lengths);
-                    } else {
-                        lens.get_mut(index)
-                            .and_then(|lens| {
-                                // dbg!(&lens);
-                                *lens = lengths.clone();
-                                Some(())
-                            })
-                            .or_else(|| {
-                                lens.push(lengths);
-                                Some(())
-                            });
-                    }
-                    Some(())
-                });
-
-                self.velocities_mut(to).and_then(|vels| {
-                    if vels.is_empty() {
-                        vels.push(velocities);
-                    } else {
-                        vels.get_mut(index)
-                            .and_then(|vels| {
-                                *vels = velocities.clone();
-                                Some(())
-                            })
-                            .or_else(|| {
-                                vels.push(velocities);
-                                Some(())
-                            });
-                    }
-                    Some(())
-                });
-                self.tempos_mut(to).and_then(|temps| {
-                    if temps.is_empty() {
-                        temps.push(tempos);
-                    } else {
-                        temps
-                            .get_mut(index)
-                            .and_then(|temps| {
-                                *temps = tempos.clone();
-                                Some(())
-                            })
-                            .or_else(|| {
-                                temps.push(tempos);
-                                Some(())
-                            });
-                    }
-                    Some(())
-                });
-
-                self.programs_mut(to).and_then(|progs| {
-                    if progs.is_empty() {
-                        progs.push(programs);
-                    } else {
-                        progs
-                            .get_mut(index)
-                            .and_then(|progs| {
-                                *progs = programs.clone();
-                                Some(())
-                            })
-                            .or_else(|| {
-                                progs.push(programs);
-                                Some(())
-                            });
-                    }
-                    Some(())
-                });
-            },
-        );
-
-        // self.children_mut(parent)
-        //     .unwrap_or(Vec::new().as_mut())
-        //     .extend(children);
+        // let children = self.children(from);
+        // let programs = std::mem::take(self.programs_mut(from));
+        // let pcs = std::mem::take(self.pcs_mut(from));
+        // let velocities = std::mem::take(self.velocities_mut(from));
+        // let registers = std::mem::take(self.registers_mut(from));
+        // let lengths = std::mem::take(self.lengths_mut(from));
+        // let tempos = std::mem::take(self.tempos_mut(from));
+        // let controllers = std::mem::take(self.controllers_mut(from));
+        self.hoist_pcs(from, to);
+        self.hoist_lengths(from, to);
+        self.add_velocities(from, to);
+        self.add_tempos(from, to);
+        self.add_registers(from, to);
+        self.add_programs(from, to);
+        self.add_controllers(from, to);
         self.move_children(from, to);
-        // self.thunks(parent).get_mut(&LifeCycleEvent::Sequencing).unwrap_or(&mut[].to_vec().as_mut()).extend(thunks);
 
-        // self.drop(from);
+        // c! {{
+        //     print_state(self, to);
+        // }}
+        // pause();
     }
 
     pub fn clean_context(&mut self, ctx: Ctx) {
-        self.programs_mut(ctx).and_then(|programs| {
-            programs.clear();
-            Some(())
-        });
-        self.pcs_mut(ctx).and_then(|pcs| {
-            pcs.clear();
-            Some(())
-        });
-        self.velocities_mut(ctx).and_then(|velocities| {
-            velocities.clear();
-            Some(())
-        });
-        self.registers_mut(ctx).and_then(|registers| {
-            registers.clear();
-            Some(())
-        });
-        self.lengths_mut(ctx).and_then(|lengths| {
-            lengths.clear();
-            Some(())
-        });
-        self.tempos_mut(ctx).and_then(|tempos| {
-            tempos.clear();
-            Some(())
-        });
-    }
-
-    pub fn flatten_stack(&mut self, ctx: Ctx) {
-        // misc(state_str(self, ctx));
-        if let Some(programs) = self.programs_mut(ctx) {
-            flatten(programs);
-        }
-        if let Some(pcs) = self.pcs_mut(ctx) {
-            flatten(pcs);
-            // misc(state_str(self, ctx));
-            // if ctx.to_usize() == 1 {
-            //     pause()
-            // }
-        }
-        if let Some(velocities) = self.velocities_mut(ctx) {
-            flatten(velocities)
-        }
-        if let Some(registers) = self.registers_mut(ctx) {
-            flatten(registers);
-        }
-        if let Some(tempos) = self.tempos_mut(ctx) {
-            flatten(tempos);
-        }
-        if let Some(lengths) = self.lengths_mut(ctx) {
-            flatten(lengths)
-        }
-
-        // misc(state_str(self, ctx));
-        // if ctx.to_usize() == 1 {
-        //     pause();
-        // }
+        self.programs_mut(ctx).clear();
+        self.pcs_mut(ctx).clear();
+        self.velocities_mut(ctx).clear();
+        self.registers_mut(ctx).clear();
+        self.lengths_mut(ctx).clear();
+        self.tempos_mut(ctx).clear();
     }
 
     pub fn drop(&mut self, ctx: Ctx) {
@@ -1543,30 +1728,46 @@ impl State {
 
     #[inline(always)]
     pub fn get_ctx_length(&self, ctx: Ctx) -> Length {
+        // print_state(self, ctx);
         let children = self.children(ctx);
         if children.len() > 0 {
+            // dbg!();
             let mut iter = children.iter().cloned();
-            let init = match self.scope(iter.next().unwrap()) {
-                Scope::Sequence => self.length_sum(iter.next().unwrap_or_default()),
-                Scope::Stack => self.min_length(iter.next().unwrap_or_default()),
+            // dbg!(iter.len());
+            let next = iter.next().unwrap();
+            let init = match self.scope(next.clone()) {
+                Scope::Sequence => self.length_sum(next.clone()),
+                Scope::Stack => self.min_length(next.clone()),
                 _ => todo!(),
             };
-            iter.fold(init, |total, ctx_| {
-                // dbg!(&total);
+            let length = iter.fold(init, |total, ctx_| {
+                // dbg!();
+                // dbg!(total.as_u64());
                 match self.scope(ctx) {
                     Scope::Sequence => total + self.get_ctx_length(ctx_),
                     Scope::Stack => total.min(self.get_ctx_length(ctx_)),
                     Scope::Set => todo!(),
                     Scope::None => Length::None,
                 }
-            })
+            });
+            // c! {{
+            //     eprintln!("{ctx:?} {}", length.clone().as_u64())
+            // }}
+            // if length.as_u64() == 0 {
+            //     pause();
+            // }
+            // dbg!(length.as_u64());
+            length
         } else {
             // dbg!();
             // misc(state_str(self, ctx));
             match self.scope(ctx) {
                 Scope::Sequence => {
                     let sum = self.length_sum(ctx);
-                    // dbg!(&sum);
+                    // c! {{
+                    //     eprintln!("{ctx:?} {sum:?} {}", sum.clone().as_u64())
+                    // }}
+                    // if sum.clone().as_u64() == 0 { pause(); }
                     sum
                 }
                 Scope::Stack => self.min_length(ctx),
@@ -1581,17 +1782,33 @@ impl State {
     }
 
     pub fn length_sum(&self, ctx: Ctx) -> Length {
+        // dbg!(ctx);
+        // print_state(self, ctx);
+
         let children = self.children(ctx);
+        // dbg!(children.len());
         if children.len() > 0 {
-            children
+            // dbg!();
+            let length = children
                 .into_iter()
-                .fold(Length::default(), |sum, ctx| sum + self.length_sum(ctx))
+                .fold(Length::default(), |sum, ctx| sum + self.length_sum(ctx));
+            // let ratio = Ratio::<BigInt>::from_integer(BigInt::from_f64(float).unwrap());
+            // Length::MicroSeconds(ratio)
+            length
         } else {
+            // dbg!();
             // misc(state_str(self, ctx));
             self.lengths(ctx)
                 .unwrap_or_default()
                 .iter()
-                .map(|lengths| lengths.iter().cloned().max().unwrap())
+                .map(|lengths| {
+                    let min = lengths.iter().cloned().min().unwrap_or_default();
+                    // if matches!(ctx, Ctx::Id(2)) {c! {{
+                    //     eprintln!("{:?} {}", min.as_ratio(), min.as_u64());
+                    //     pause();
+                    // }}}
+                    min
+                })
                 .sum()
         }
     }
@@ -1601,7 +1818,9 @@ impl State {
         if children.len() > 0 {
             children
                 .into_iter()
-                .fold(Length::default(), |sum, ctx| self.get_ctx_length(ctx))
+                .fold(Length::default_max(), |min, ctx| {
+                    min.min(self.get_ctx_length(ctx))
+                })
         } else {
             self.lengths(ctx)
                 .unwrap_or_default()
@@ -1634,59 +1853,136 @@ impl State {
     }
 
     pub fn combine_sequences(&mut self, ctxs: Vec<Ctx>) {
-        status(format!(
-            "{}COMBINE SEQUENCES {}",
-            color!(),
-            ctxs.iter()
-                .cloned()
-                .map(|ctx| format!("{ctx:?}").to_uppercase())
-                .collect::<Vec<String>>()
-                .join(", "),
-        ));
+        // eprintln!(
+        //     "{}COMBINE SEQUENCES {}",
+        //     color!(),
+        //     ctxs.iter()
+        //         .cloned()
+        //         .map(|ctx| format!("{ctx:?}").to_uppercase())
+        //         .collect::<Vec<String>>()
+        //         .join(", "),
+        // );
 
-        let len: Length = ctxs
-            .first()
-            .cloned()
-            .and_then(|ctx| {
-                // compose_thunks(ctx, ctx, self);
-                // self.call_thunks(ctx, LifeCycleEvent::Sequencing);
-                misc(state_str(self, ctx));
-                // pause();
-                Some(self.get_ctx_length(ctx))
-            })
-            .unwrap_or_default();
-
-        log(format!("LEN: {}", len.as_u64()));
+        // c! {{ctxs.iter().cloned().for_each(|ctx| print_state(self, ctx));}}
         // pause();
 
+
+        let mut parent = self.parent(ctxs.first().cloned().unwrap_or(Ctx::Root));
+        let first_ctx = ctxs.first().cloned().unwrap_or(Ctx::Root);
+        // let len = self.get_ctx_length(ctxs.first().cloned().unwrap_or_default());
+        let ctx_len = self.get_ctx_length(first_ctx);
+        // c!{{
+        //     eprintln!("{first_ctx:?} ctx_len: {}", ctx_len.as_u64());
+        //     print_state(self, first_ctx);
+        // }}
+        // let len: Length = ctxs
+        //     .first()
+        //     .cloned()
+        //     .and_then(|ctx| {
+        //         // misc(state_str(self, ctx));
+        //         // pause();
+
+        //         Some(self.get_ctx_length(ctx))
+        //     })
+        //     .unwrap_or_default();
+
+        // log(format!("LEN: {}", len.as_u64()));
+        // pause();
+        //
+        c! {{
+            print_state(self, first_ctx);
+        }}
+
+        self.call_thunks(parent, first_ctx, LifeCycleEvent::PreSequence);
+
+        // c! {{
+        //     print_state(self, first_ctx);
+        //     pause();
+        // }}
+
         ctxs.iter().cloned().for_each(|ctx| {
-            dbg!();
-            print_state(self, ctx);
-            // pause();
-            // self.call_thunks(ctx, LifeCycleEvent::Sequencing);
-            self.cycle_fill(ctx, len.clone());
-            // self.call_thunks(ctx, LifeCycleEvent::Sequencing);
-            dbg!();
-            print_state(self, ctx);
-            // pause();
+            // c! {{
+            //     eprintln!("{ctx:?} {ctx_len:?}");
+            //     // print_state(self, ctx);
+            // }}
+            self.cycle_fill(ctx, ctx_len.clone());
+            // c! {
+            //     {
+            //         print_state(self, ctx);
+            //         let ctx_len = self.get_ctx_length(ctx);
+            //         eprintln!("{ctx:?} ctx_len: {}", ctx_len.as_u64());
+            //         // pause();
+            //     }
+            // }
+
+            // if matches!(
+            //     (self.scope(parent), self.scope(ctx)),
+            //     (Scope::Stack, Scope::Sequence)
+            // ) {
+            //     self.call_thunks(self.parent(parent), ctx, LifeCycleEvent::PreSequence);
+            // }
+
+            self.call_thunks(parent, ctx, LifeCycleEvent::PreSequence);
+
+            // c! {
+            //     {
+            //         print_state(self, ctx);
+            //         pause();
+            //     }
+            // }
         });
 
         let start = self.playhead().clone();
-        dbg!(start.as_u64());
+        // dbg!(&ctxs);
+        // eprint!("{}", color!());
+        // dbg!(start.as_u64());
         // pause();
         let mut counters = Vec::<Length>::new();
+        let mut counter = start.clone();
         let mut len = Length::default();
 
+        // eprintln!("");
+
         ctxs.iter().cloned().for_each(|ctx| {
-            dbg!();
-            print_state(self, ctx);
+            // c! {{
+            //     eprintln!("{ctx:?}");
+            // }}
+            let lengths = self.lengths(ctx).unwrap_or_default();
+            let sum = lengths
+                .iter()
+                .cloned()
+                .fold(Length::default(), |sum, lengths_| {
+                    sum + lengths_.iter().cloned().min().unwrap_or_default()
+                });
+            // dbg!(ctx, lengths.len(), sum.as_u64());
+
+            // dbg!(self.get_ctx_length(ctx).as_u64());
+        });
+        // pause();
+
+        ctxs.iter().cloned().for_each(|ctx| {
+            // print_state(self, ctx);
+
             // pause();
             let lengths = self.lengths(ctx).unwrap_or_default();
-            let rows = lengths
-                .iter()
-                .fold(0, |max, lengths| max.max(lengths.len()));
-            let mut counter = start.clone();
+            // let rows = lengths
+            //     .iter()
+            //     .fold(0, |max, lengths| max.max(lengths.len()));
+            counter = start.clone();
+
             len = Length::default();
+
+            // dbg!(
+            //     lengths.len(),
+            //     self.pcs(ctx).unwrap_or_default().len(),
+            //     self.registers(ctx).unwrap_or_default().len(),
+            //     self.velocities(ctx).unwrap_or_default().len(),
+            //     self.tempos(ctx).unwrap_or_default().len(),
+            //     self.programs(ctx).unwrap_or_default().len(),
+            //     self.controllers(ctx).unwrap_or_default().len()
+            // );
+            // pause();
+
             zip(
                 lengths.into_iter(),
                 zip(
@@ -1697,26 +1993,32 @@ impl State {
                             self.velocities(ctx).unwrap_or_default().into_iter(),
                             zip(
                                 self.tempos(ctx).unwrap_or_default().into_iter(),
-                                self.programs(ctx).unwrap_or_default().into_iter(),
+                                zip(
+                                    self.programs(ctx).unwrap_or_default().into_iter(),
+                                    self.controllers(ctx).unwrap_or_default().into_iter(),
+                                ),
                             ),
                         ),
                     ),
                 ),
             )
             .for_each(
-                |(lengths, (pcs, (registers, (velocities, (tempos, programs)))))| {
-                    counter += len.clone();
-
-                    // dbg!(
-                    //     lengths.len(),
-                    //     pcs.len(),
-                    //     registers.len(),
-                    //     velocities.len(),
-                    //     tempos.len(),
-                    //     programs.len()
+                |(lengths, (pcs, (registers, (velocities, (tempos, (programs, controllers))))))| {
+                    // eprint!(
+                    //     "{Yellow}{} ",
+                    //     lengths
+                    //         .first()
+                    //         .cloned()
+                    //         .unwrap_or_default()
+                    //         .to_note(&tempos.first().cloned().unwrap_or_default())
                     // );
-                    // dbg!(&counter);
+
+                    counter += len.clone();
+                    // c! {{
+                    //     eprint!("{ctx:?} start: {}, counter: {} pcs: {pcs:?} regs: {registers:?}", start.as_f64(), counter.as_f64());
+                    // }}
                     // pause();
+
                     let slice = Slice::new(
                         pcs.clone(),
                         registers.clone(),
@@ -1724,33 +2026,59 @@ impl State {
                         velocities.clone(),
                         tempos.clone(),
                         programs.clone(),
+                        controllers.clone(),
                     );
 
                     if !self.timeline_.contains_key(&counter) {
                         self.timeline_.insert(counter.clone(), vec![]);
                     }
-                    self.timeline_.get_mut(&counter).and_then(|slices| {
-                        slices.push(slice);
-                        Some(())
-                    });
+                    let slices = self.timeline_.entry(counter.clone()).or_default();
+                    slices.push(slice.clone());
 
                     len = lengths.iter().cloned().min().unwrap_or_default();
+
+                    // c! {
+                    //     {
+                    //         eprintln!("{}: {:?}", counter.as_f64(), self.timeline_.get(&counter).cloned().unwrap_or_default().iter().map(|slice| format!("{:?}", slice.pcs)).collect::<Vec<_>>());
+                    //         pause();
+                    //     }
+                    // }
                 },
             );
 
-            counter += len.clone();
-
-            counters.push(counter);
-            // dbg!(&counters);
+            // self.timeline_.iter().for_each(|(time, slices)| {
+            //     // eprint!("T: {:<13}", time.as_u64());
+            //     slices.iter().for_each(|slice| {
+            //         eprintln!(
+            //             "{}",
+            //             zip(
+            //                 slice.lengths.iter(),
+            //                 zip(slice.tempos.iter(), slice.pcs.iter())
+            //             )
+            //             .map(|(len, (tmp, pc))| format!(
+            //                 "{}",
+            //                 if matches!(pc, Pc::Class(_)) {
+            //                     len.clone().to_note(tmp)
+            //                 } else {
+            //                     len.clone().to_rest(tmp)
+            //                 }
+            //             ))
+            //             .collect::<Vec<_>>()
+            //             .join(" ")
+            //         );
+            //     });
+            // });
             // pause();
         });
 
-        let len = counters.iter().cloned().min().unwrap_or_default();
-        dbg!(&len);
         // pause();
-        // let len = self.get_ctx_length(self.parent(ctxs.first().cloned().unwrap_or_default()));
-        *self.playhead() = len;
-        ctxs.into_iter().for_each(|ctx| self.drop(ctx));
+        counter += len.clone();
+
+        let ctx_len = self.get_ctx_length(parent);
+        // *self.playhead() += ctx_len;
+        *self.playhead() = counter.clone();
+
+        // dbg!(&counter, self.playhead());
     }
 
     fn emplace<T: Clone + Default + Debug>(
@@ -1818,6 +2146,21 @@ impl State {
             self.programs(from)
                 .and_then(|ts| ts.get(col).cloned())
                 .unwrap_or_default(),
+            self.controllers(from)
+                .and_then(|ts| ts.get(col).cloned())
+                .unwrap_or_default(),
         )
+    }
+
+    pub fn pedal(&self, ch: u8) -> bool {
+        self.pedal.get(&ch).cloned().unwrap_or_default()
+    }
+
+    pub fn toggle_pedal(&mut self, ch: u8) {
+        let pedal = self.pedal.entry(ch).or_insert(false);
+        // eprintln!("toggle_pedal({ch}) pedal: {pedal}");
+        *pedal = !*pedal;
+        // eprintln!("toggle_pedal({ch}) pedal: {pedal}");
+        // pause();
     }
 }

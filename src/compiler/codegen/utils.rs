@@ -4,10 +4,13 @@ use std::{
     fmt::Display,
     io::stderr,
     iter::{Cloned, Cycle, from_fn, repeat_n, zip},
-    ops::{Deref, Div, Mul, Rem},
+    ops::{Deref, Div, Mul, Neg, Rem},
+    process::id,
     slice::Iter,
     sync::LazyLock,
 };
+
+pub const QUARTER_NOTE_RATIO: f64 = 4.0;
 
 use crate::{
     color,
@@ -226,39 +229,32 @@ macro_rules! color (
 
 );
 
+#[macro_export]
+macro_rules! c {
+    () => {
+        eprint!("{}", color!())
+    };
+
+    { $tt: tt } => {
+        c!();
+        dbg!();
+        $tt
+        eprint!("{}", TextStyle::ResetColor);
+    }
+}
+
 pub fn length_to_ticks(length: Length, tempo: Mpb) -> u64 {
     let ticks = match length {
         Length::None => 0,
         Length::MicroSeconds(ratio) => (ratio / tempo.0
-            * Ratio::<u64>::from_u16(PPQ.as_int()).unwrap())
+            * Ratio::<BigInt>::from_integer(BigInt::from_u16(PPQ.as_int()).unwrap_or_default()))
+        .to_integer()
         .to_u64()
-        .unwrap(),
+        .unwrap_or_default(),
     };
     // dbg!(ticks);
     // pause();
     ticks
-}
-
-pub fn compose_thunks(from: Ctx, into: Ctx, state: &mut State) {
-    info(format!(
-        "{}COMPOSE THUNKS FROM {from:?} INTO {into:?}",
-        color!()
-    ));
-    misc(format!("{:?}", state.thunks(from)));
-    // pause();
-    misc(state_str(state, into));
-    // pause();
-    if let Some(thunks) = state.thunks_mut(from) {
-        if let Some(thunks) = thunks.get_mut(&LifeCycleEvent::Composing) {
-            thunks.reverse();
-            if let Some(mut thunk) = thunks.pop() {
-                thunk.call(into, state);
-                compose_thunks(from, into, state);
-            }
-        }
-    }
-    misc(state_str(state, into));
-    // pause();
 }
 
 pub fn gcf<T: Div + Rem<Output = T> + From<u64> + PartialOrd + Ord + PartialEq + Eq + Copy>(
@@ -376,25 +372,27 @@ pub fn print_state(state: &State, ctx: Ctx) {
     let mut lines: Vec<String> = text.split("\n").map(str::to_string).collect();
 
     lines.into_iter().for_each(|line| {
-        execute!(
-            stderr(),
-            SavePosition,
-            Print(format!("{line}")),
-            RestorePosition,
-            MoveDown(1)
-        );
+        eprintln!("{line}");
+        // execute!(
+        //     stderr(),
+        //     SavePosition,
+        //     Print(format!("{line}")),
+        //     RestorePosition,
+        //     MoveDown(1)
+        // );
     });
     // eprint!("\n");
 }
 
 #[inline(always)]
 pub fn print_states(state: &State, ctx: Ctx) {
-    // execute!(
-    //     stderr(),
-    //     SavePosition,
-    //     MoveTo(0, 4),
-    //     Clear(ClearType::CurrentLine)
-    // );
+    execute!(
+        stderr(),
+        MoveTo(0, 0),
+        Clear(ClearType::All) // SavePosition,
+                              // MoveTo(0, 4),
+                              // Clear(ClearType::CurrentLine)
+    );
     eprint!("{}", color!());
     misc(state_str(state, ctx));
     state
@@ -403,6 +401,8 @@ pub fn print_states(state: &State, ctx: Ctx) {
         .cloned()
         .for_each(|ctx| print_states(state, ctx));
     // execute!(stderr(), Clear(ClearType::UntilNewLine), RestorePosition);
+
+    // trace(TextStyle::BoldCyan);
 }
 
 pub fn print_slice(ctx: Ctx, col: usize, state: &mut State) {
@@ -484,7 +484,10 @@ pub fn print_slice(ctx: Ctx, col: usize, state: &mut State) {
                 MoveDown(1),
                 SavePosition,
                 // MoveRight(row_str.len() as u16),
-                Print(format!("TMP: {}", tempo.clone().0.to_u64().unwrap())),
+                Print(format!(
+                    "TMP: {}",
+                    tempo.clone().0.to_integer().to_u64().unwrap()
+                )),
                 RestorePosition,
                 MoveDown(1),
                 SavePosition,
@@ -544,6 +547,49 @@ pub fn print_slices(ctx: Ctx, from: u16, to: u16, state: &mut State) {
     }
 
     execute!(stderr(), Clear(ClearType::FromCursorDown), RestorePosition);
+}
+
+const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+pub fn print_timeline(state: &State) {
+    state
+        .timeline()
+        .into_iter()
+        .rev()
+        .take(10)
+        .rev()
+        .for_each(|(t, s)| {
+            eprintln!(
+                "{}T: {:<10} {}",
+                TextStyle::BoldCyan,
+                t.as_u64(),
+                s.iter()
+                    .map(|s| format!(
+                        "[{} ]\n{:<14}",
+                        s.pcs
+                            .iter()
+                            .cloned()
+                            .zip(s.lengths.iter().cloned())
+                            .zip(s.controllers.iter().cloned())
+                            .map(|((pc, len), controllers)| format!(
+                                " {} {} {:?}",
+                                if pc != Pc::None {
+                                    NOTE_NAMES[pc.as_f64() as usize % 12]
+                                } else {
+                                    ""
+                                },
+                                len.as_u64(),
+                                controllers
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        " "
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("")
+            )
+        });
 }
 
 pub fn print_stacks(state: &mut State) {
@@ -674,7 +720,7 @@ pub fn note_str(ctx: Ctx, state: &mut State) -> String {
                 .zip(tempos.iter().cycle())
                 .zip(pcs.iter())
                 .for_each(|(((row, length), tempo), pc)| {
-                    let beam_ = if length.as_u64() < tempo.0.to_u64().unwrap() {
+                    let beam_ = if length.as_u64() < tempo.0.to_integer().to_u64().unwrap() {
                         if !beam {
                             beam = !beam;
                             SB
@@ -842,7 +888,7 @@ pub fn state_str(state: &State, ctx: Ctx) -> String {
                     .into_iter()
                     .map(|tempo| format!(
                         "\u{1d15f} = {0:^1$}",
-                        60_000_000 / tempo.0.to_u64().unwrap(),
+                        60_000_000 / tempo.0.to_integer().to_u64().unwrap(),
                         len
                     ))
                     .collect::<Vec<_>>()
@@ -851,6 +897,30 @@ pub fn state_str(state: &State, ctx: Ctx) -> String {
         })
         .collect::<Vec<String>>()
         .join(" ");
+
+    let controllers = state
+        .controllers(ctx)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(|maps| {
+            format!(
+                "[{}]",
+                maps.into_iter()
+                    .map(|map| format!(
+                        "{{{}}}",
+                        map.iter()
+                            .cloned()
+                            .map(|(k, v)| format!("{k}: {v}"))
+                            .collect::<Vec<String>>()
+                            .join(",")
+                    ))
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<String>>()
+        .join(", ");
     let programs: String = state
         .programs(ctx)
         .unwrap_or_default()
@@ -870,7 +940,7 @@ pub fn state_str(state: &State, ctx: Ctx) -> String {
         .join(" ");
     let mut text = format!(
         // "{:?} {:?} -> {:?} {:?}\nProg: [{programs}]\nPCs : [{pcs}]\nVel : [{velocities}]\nReg : [{registers}]\nLens: [{lengths}]\nTmps: [{tempos}]\nBnds: {:?}\nChil: {:?}\n",
-        "{} -> {}\nPCs : [{pcs}]\nVel : [{velocities}]\nReg : [{registers}]\nLens: [{}]\nProg: [{programs}]\nTmps: [{}]\nChil: {:?}\n",
+        "{} -> {}\nPCs : [{pcs}]\nVel : [{velocities}]\nReg : [{registers}]\nLens: [{}]\nProg: [{programs}]\nTmps: [{}]\nCtls: [{}]\nChil: {:?}\n",
         parent_str,
         child_str,
         // state
@@ -880,6 +950,7 @@ pub fn state_str(state: &State, ctx: Ctx) -> String {
         //     .collect::<Vec<_>>(),
         lengths,
         tempos,
+        controllers,
         state.children(ctx),
     );
     text
@@ -1222,7 +1293,11 @@ pub fn graph(state: &State, mut ctx: Ctx, layers: usize) {
         //     row.reverse();
         // }
 
-        execute!(stderr(), SavePosition, MoveTo(0u16, height as u16 / 3 as u16));
+        // execute!(
+        //     stderr(),
+        //     SavePosition,
+        //     MoveTo(0u16, height as u16 / 3 as u16)
+        // );
         for lines in table.clone() {
             let line = lines.join("");
             if line.chars().all(|c| c == '\u{a0}' || c == ' ') {
@@ -1231,8 +1306,7 @@ pub fn graph(state: &State, mut ctx: Ctx, layers: usize) {
             eprintln!("{0:^1$}", line, size().unwrap().0 as usize);
         }
 
-        execute!(stderr(), RestorePosition);
-
+        // execute!(stderr(), RestorePosition);
     }
 }
 
@@ -1247,12 +1321,13 @@ pub fn trace(style: TextStyle) {
         std::backtrace::Backtrace::capture()
             .to_string()
             .split("\n")
-            .filter(|s| s.contains("dsch") || s.contains("compiler"))
+            // .filter(|s| s.contains("dsch") || s.contains("compiler"))
             .collect::<Vec<&str>>()
             .join("\n"),
         TextStyle::ResetColor
     );
-    misc(s);
+    // misc(s);
+    eprintln!("{s}");
 }
 
 pub fn bezier<T: Clone + Into<f64>>(pts: Vec<T>, t: f64) -> f64 {
@@ -1341,4 +1416,128 @@ pub fn B(i: usize, p: usize, t: f64, ts: &Vec<f64>) -> f64 {
 pub fn C(p: Vec<f64>) -> f64 {
     let j = p.len();
     todo!()
+}
+
+pub trait Coord:
+    Clone
+    + Sum
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + PartialEq
+    + Eq
+{
+    type MultiplicativeIdentity;
+    fn id(&self) -> Self::MultiplicativeIdentity;
+}
+
+// #[derive(Clone, Debug)]
+// struct Pt {
+//     x: impl Coord,
+//     y: impl Coord
+// }
+
+#[allow(non_snake_case)]
+/// Lagrange interpolation
+pub fn L(t: f64, points: &Vec<(f64, f64)>) -> f64
+
+{
+    points
+        .iter()
+        .cloned()
+        .map(|pt| {
+            let (x, y) = pt.clone();
+            let filtered = points.iter().filter(|pt_| pt_.0 != x).collect::<Vec<_>>();
+            let t_ = y * filtered.into_iter().fold(0.0, |fac, pt__| {
+                let x_ = pt__.0.clone();
+                let fac = ((t.clone() - x_.clone()) / (x.clone() - x_.clone())) * fac;
+                fac
+            });
+            t_
+        })
+        .sum()
+}
+
+pub fn lerp(t: f64, points: &Vec<(f64, f64)>) -> f64
+{
+    points[..points.len().max(1) - 1]
+        .iter()
+        .zip(points[1..].iter())
+        .map(|((x0, y0), (x1, y1))| {
+            eprintln!(
+                "t: {:?} x0: {:?} y0: {:?} x1: {:?} y1: {:?}",
+                t.clone(),
+                x0.clone(),
+                y0.clone(),
+                x1.clone(),
+                y1.clone()
+            );
+            if t < x0.clone() || (t >= x1.clone() && x1.clone() < points.last().cloned().unwrap_or_default().0) {
+                0.0
+            } else {
+                y0.clone()
+                    + (t.clone() - x0.clone()) / (x1.clone() - x0.clone())
+                        * (y1.clone() - y0.clone())
+            }
+        })
+        .sum()
+}
+
+#[test]
+fn test_lerp() {
+    let ys = vec![0.0, 1.0, 0.5, 1.5, 0.75];
+    let points: Vec<(f64, f64)> = (0..5)
+        .map(|idx| {
+            let x = idx as f64 / 4.0;
+            let y = ys[idx];
+            eprintln!("x: {x} y: {y}");
+            (x, y)
+        })
+        .collect();
+
+    eprintln!(
+        "{}",
+        points
+            .iter()
+            .map(|(x, y)| format!(
+                "x: {} y: {}",
+                x,
+                y
+            ))
+            .collect::<Vec<String>>()
+            .join("\n")
+    );
+
+    let y = lerp(
+        0.0,
+        &points,
+    );
+    eprintln!("y: {}", y);
+    assert_eq!(y, 0.0);
+    let y = lerp(
+        0.25,
+        &points,
+    );
+    eprintln!("y: {}", y);
+    assert_eq!(y, 1.0);
+    let y = lerp(
+0.5,
+
+        &points,
+    );
+    eprintln!("y: {}", y);
+    assert_eq!(y, 0.5);
+    let y = lerp(
+        0.75,
+        &points,
+    );
+    eprintln!("y: {}", y);
+    assert_eq!(y, 1.5);
+    let y = lerp(
+        1.0,
+        &points,
+    );
+    eprintln!("y: {}", y);
+    assert_eq!(y, 0.75);
 }

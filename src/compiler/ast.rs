@@ -1,11 +1,27 @@
 #![allow(unused, const_item_mutation)]
 use std::{
-    collections::VecDeque, default, fmt::Display, hash::{BuildHasher, DefaultHasher}, ops::{Add, Div, Mul, Rem, Sub}, str::FromStr
+    collections::VecDeque,
+    default,
+    fmt::Display,
+    hash::{BuildHasher, DefaultHasher},
+    iter::Sum,
+    ops::{Add, Div, Mul, Rem, Sub},
+    str::FromStr,
 };
 
+use num_bigint::BigInt;
+use num_rational::Ratio;
+use num_traits::{FromPrimitive, ToPrimitive};
+// use derive_more::{Add, Mul, Sum};
+use pest::error::Error;
 
 use crate::compiler::{
-    codegen::{self, *},
+    codegen::{
+        self,
+        state::State,
+        utils::{Coord, QUARTER_NOTE_RATIO},
+        *,
+    },
     functional::*,
 };
 
@@ -26,7 +42,12 @@ pub enum Exp {
 
 impl Exp {
     pub fn to_string(&self) -> String {
-        let s = format!("{self}").rsplit_once("::").unwrap().1.replace("}", "").to_string();
+        let s = format!("{self}")
+            .rsplit_once("::")
+            .unwrap()
+            .1
+            .replace("}", "")
+            .to_string();
         s.clone()
             .chars()
             .map(|c| {
@@ -79,10 +100,7 @@ impl Display for Exp {
                                 Infix::Colon => "Infix::Colon",
                                 Infix::Intercalate => "Infix::Intercalate",
                                 Infix::Range => "Infix::Range(",
-                                Infix::Interpolation(interpolation) => match interpolation {
-                                    Interpolation::Increase => "Interpolation::Increase)",
-                                    Interpolation::Decrease => "Interpolation::Decrease)",
-                                },
+                                Infix::Lerp => "Infix::Lerp",
                                 Infix::Plus => "Infix::Plus)",
                                 Infix::Minus => "Infix::Minus)",
                                 Infix::Mul => "Infix::Mul)",
@@ -113,6 +131,7 @@ impl Display for Exp {
 
                         Scalar::Tuplet(tuplet) => format!("Scalar::Tuplet({tuplet:?}))"),
                         Scalar::Register(register) => format!("Scalar::Register({register:?}))"),
+
                         _ => todo!(),
                     }
                     .to_owned(),
@@ -120,6 +139,8 @@ impl Display for Exp {
                         "Simple::Decl(Decl {{ ident: {} binding: {binding} }})",
                         ident.0
                     ),
+                    Simple::Controller(ControllerType::Pedal) =>
+                        format!("Simple::Controller::Pedal)").parse().unwrap(),
                     Simple::Ident(ident) => format!("Simple::Ident({ident:?}))").parse().unwrap(),
                     _ => todo!(),
                 }
@@ -153,7 +174,12 @@ pub struct Bpm(pub Absolute);
 pub enum Decl {
     ImportDecl(ImportDecl),
     ExpDecl(ExpDecl),
-    FuncDecl(FuncDecl)
+    FuncDecl(FuncDecl),
+}
+
+#[derive(Debug, Clone)]
+pub enum ControllerType {
+    Pedal,
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +189,7 @@ pub struct ImportDecl(Ident);
 pub struct FuncDecl {
     pub ident: Ident,
     pub params: Vec<Ident>,
-    pub funcdef: Vec<Exp>
+    pub funcdef: Vec<Exp>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +205,7 @@ pub enum Simple {
     Infix(Infix),
     Suffix(Suffix),
     Decl(Decl),
+    Controller(ControllerType),
     Ident(Ident),
 }
 
@@ -187,7 +214,7 @@ pub enum Compound {
     Parens(Vec<Exp>),
     Braces(Vec<Exp>),
     Brackets(Vec<Exp>),
-    Ratio(Vec<Absolute>)
+    Ratio(Vec<Absolute>),
 }
 
 impl From<Compound> for VecDeque<Exp> {
@@ -209,7 +236,7 @@ impl Compound {
     pub fn exps_mut(&mut self) -> &mut Vec<Exp> {
         match self {
             Compound::Parens(exps) | Compound::Braces(exps) | Compound::Brackets(exps) => exps,
-            Compound::Ratio(absolutes) => todo!()
+            Compound::Ratio(absolutes) => todo!(),
         }
     }
 
@@ -246,16 +273,182 @@ pub enum Scalar {
     Frequency(Absolute),
     Pure(Pure),
     Dynamic(Dynamic),
+    Tempo(Absolute),
     Tuplet(Tuplet),
     Prog(Prog),
     Register(Register),
     Rest,
 }
 
-#[derive(Clone, Debug)]
-pub struct Dynamic(pub String);
+// impl Coord for Scalar {
+//     fn id(&self) -> Self {
+//         match self {
+//             Scalar::Duration(_) => Scalar::Duration(Duration::Fractional(Fractional::Absolute(
+//                 Absolute::Float(1.0),
+//             ))),
+//             Scalar::Frequency(_) => todo!(),
+//             Scalar::Pure(_) => Scalar::Pure(Pure::Absolute(Absolute::Float(1.0))),
+//             Scalar::Dynamic(_) => Scalar::Dynamic(Dynamic::Id),
+//             Scalar::Tuplet(_) => todo!(),
+//             Scalar::Prog(_) => todo!(),
+//             Scalar::Register(_) => todo!(),
+//             Scalar::Rest => todo!(),
+//         }
+//     }
+// }
 
+impl Add for Scalar {
+    type Output = Self;
 
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Scalar::Duration(lhs), Scalar::Duration(rhs)) => {
+                Scalar::Duration(Duration::Fractional(Fractional::Absolute(Absolute::Float(
+                    lhs.as_f64() + rhs.as_f64(),
+                ))))
+            }
+            (Scalar::Frequency(lhs), Scalar::Frequency(rhs)) => todo!(),
+            (Scalar::Pure(lhs), Scalar::Pure(rhs)) => Scalar::Pure(lhs + rhs),
+            (Scalar::Dynamic(lhs), Scalar::Dynamic(rhs)) => {
+                Scalar::Pure(Pure::Absolute(Absolute::Float(lhs.as_f64() + rhs.as_f64())))
+            }
+            (Scalar::Tuplet(lhs), Scalar::Tuplet(rhs)) => todo!(),
+            (Scalar::Prog(lhs), Scalar::Prog(rhs)) => todo!(),
+            (Scalar::Register(lhs), Scalar::Register(rhs)) => todo!(),
+            _ => todo!(),
+        }
+    }
+}
+
+impl Sum for Scalar {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.reduce(|acc, s| acc + s).unwrap()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, Hash)]
+pub enum Dynamic {
+    Id,
+    PPP,
+    PP,
+    P,
+    MP,
+    Default,
+    MF,
+    F,
+    FF,
+    FFF,
+}
+
+impl Mul for Dynamic {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self::from(self.as_f64() * rhs.as_f64())
+    }
+}
+
+impl Coord for Dynamic {
+    type MultiplicativeIdentity = f64;
+    fn id(&self) -> Self::MultiplicativeIdentity {
+        Dynamic::Id.as_f64()
+    }
+}
+
+impl PartialOrd for Dynamic {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.as_f64().partial_cmp(&other.as_f64())
+    }
+}
+
+impl FromStr for Dynamic {
+    type Err = Error<Dynamic>;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "ppp" => Self::PPP,
+            "pp" => Self::PP,
+            "p" => Self::P,
+            "mp" => Self::MP,
+            "mf" => Self::MF,
+            "f" => Self::F,
+            "ff" => Self::FF,
+            "fff" => Self::FFF,
+            "id" => Self::Id,
+            _ => Self::Default,
+        })
+    }
+}
+
+impl PartialEq for Dynamic {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_f64() == other.as_f64()
+    }
+}
+
+impl Add for Dynamic {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::from(self.as_f64() + rhs.as_f64())
+    }
+}
+
+impl Sub for Dynamic {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self::from(self.as_f64() - rhs.as_f64())
+    }
+}
+
+impl Sum for Dynamic {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.reduce(|acc, d| Dynamic::from(acc.as_f64() + d.as_f64()))
+            .unwrap()
+    }
+}
+
+impl Div for Dynamic {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        Dynamic::from(self.as_f64() / rhs.as_f64())
+    }
+}
+
+impl From<f64> for Dynamic {
+    fn from(value: f64) -> Self {
+        match value {
+            20.0..39.0 => Dynamic::PPP,
+            39.0..57.0 => Dynamic::PP,
+            57.0..71.0 => Dynamic::P,
+            71.0..84.0 => Dynamic::MP,
+            84.0..98.0 => Dynamic::MF,
+            98.0..113.0 => Dynamic::F,
+            113.0..127.0 => Dynamic::FF,
+            127.0 => Dynamic::FFF,
+            _ => Dynamic::Default,
+        }
+    }
+}
+
+impl Dynamic {
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            Dynamic::Id => 1.,
+            Dynamic::PPP => 20.,
+            Dynamic::PP => 39.,
+            Dynamic::P => 57.,
+            Dynamic::MP => 71.,
+            Dynamic::Default => 80.,
+            Dynamic::MF => 84.,
+            Dynamic::F => 98.,
+            Dynamic::FF => 113.,
+            Dynamic::FFF => 127.,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Frequency(pub Pure);
@@ -265,7 +458,7 @@ pub enum Infix {
     Colon,
     Intercalate,
     Range,
-    Interpolation(Interpolation),
+    Lerp,
     Plus,
     Minus,
     Mul,
@@ -319,14 +512,14 @@ impl From<Data> for Interpolation {
 pub enum Prefix {
     Dur,
     Reg,
-    Prog
+    Prog,
 }
 
 impl Prefix {
     pub fn unwrap(exp: Exp) -> Option<Self> {
         match exp {
             Exp::Simple(Simple::Prefix(prefix)) => Some(prefix),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -344,6 +537,21 @@ pub enum Duration {
     Fractional(Fractional),
 }
 
+impl Mul for Duration {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Duration::Fixed(lhs), Duration::Fixed(rhs)) => Duration::Fixed(lhs * rhs),
+            (Duration::Fixed(fixed), Duration::Fractional(fractional)) => todo!(),
+            (Duration::Fractional(fractional), Duration::Fixed(fixed)) => todo!(),
+            (Duration::Fractional(lhs), Duration::Fractional(rhs)) => {
+                Duration::Fractional(lhs * rhs)
+            }
+        }
+    }
+}
+
 impl From<Duration> for Data {
     fn from(value: Duration) -> Self {
         match value {
@@ -357,29 +565,141 @@ impl From<Duration> for Data {
     }
 }
 
-#[derive(Debug, Clone)]
+impl Duration {
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            Duration::Fixed(fixed) => todo!(),
+            Duration::Fractional(fractional) => match fractional {
+                Fractional::Absolute(absolute) => absolute.as_f64(),
+                Fractional::Tuplet(tuplet) => todo!(),
+                Fractional::Rational(rational) => rational.num.as_f64() / rational.den.as_f64(),
+            },
+        }
+    }
+
+    pub fn to_micros(&self, state: &State) -> Ratio<BigInt> {
+        // dbg!();
+        if let Duration::Fractional(Fractional::Absolute(absolute)) = self {
+            let tempo = state.tempo().0.clone();
+            let float = absolute.as_f64() / QUARTER_NOTE_RATIO;
+            let ratio = Ratio::<BigInt>::from_float(float).unwrap();
+            // dbg!(tempo, ratio.clone(), absolute.as_f64(), absolute.as_f64() / QUARTER_NOTE_RATIO);
+            Ratio::<BigInt>::from(state.tempo().0.clone() / ratio.max(Ratio::<BigInt>::from_float(f64::EPSILON).unwrap_or_default()))
+        } else {
+            state.tempo().0.clone() / Ratio::<BigInt>::from_float(1.0 / QUARTER_NOTE_RATIO).unwrap()
+        }
+    }
+}
+
+#[derive(Debug, Clone, derive_more::Add, derive_more::Div)]
+#[div(forward)]
 pub struct Fixed {
     pub minutes: Absolute,
     pub seconds: Absolute,
 }
 
-#[derive(Debug, Clone)]
+impl Mul for Fixed {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self::Output {
+        let seconds = self.seconds.as_u64() * rhs.seconds.as_u64() % 60;
+        let minutes = self.minutes.as_u64() * rhs.minutes.as_u64()
+            + self.seconds.as_u64() * rhs.seconds.as_u64() / 60;
+        Self {
+            minutes: Absolute::UInt(minutes),
+            seconds: Absolute::UInt(seconds),
+        }
+    }
+}
+
+#[derive(Debug, Clone, derive_more::Add)]
 pub enum Fractional {
     Absolute(Absolute),
     Tuplet(Tuplet),
     Rational(Rational),
 }
 
-#[derive(Debug, Clone)]
+impl Mul for Fractional {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Fractional::Absolute(lhs), Fractional::Absolute(rhs)) => {
+                Fractional::Absolute(lhs * rhs)
+            }
+            (Fractional::Absolute(lhs), Fractional::Tuplet(rhs)) => todo!(),
+            (Fractional::Absolute(lhs), Fractional::Rational(rhs)) => todo!(),
+            (Fractional::Tuplet(lhs), Fractional::Absolute(rhs)) => todo!(),
+            (Fractional::Tuplet(lhs), Fractional::Tuplet(rhs)) => todo!(),
+            (Fractional::Tuplet(lhs), Fractional::Rational(rhs)) => todo!(),
+            (Fractional::Rational(lhs), Fractional::Absolute(rhs)) => todo!(),
+            (Fractional::Rational(lhs), Fractional::Tuplet(rhs)) => todo!(),
+            (Fractional::Rational(lhs), Fractional::Rational(rhs)) => todo!(),
+        }
+    }
+}
+
+impl Div for Fractional {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Fractional::Absolute(lhs), Fractional::Absolute(rhs)) => {
+                Fractional::Absolute(lhs / rhs)
+            }
+            (Fractional::Absolute(lhs), Fractional::Tuplet(rhs)) => todo!(),
+            (Fractional::Absolute(lhs), Fractional::Rational(rhs)) => todo!(),
+            (Fractional::Tuplet(lhs), Fractional::Absolute(rhs)) => todo!(),
+            (Fractional::Tuplet(lhs), Fractional::Tuplet(rhs)) => todo!(),
+            (Fractional::Tuplet(lhs), Fractional::Rational(rhs)) => todo!(),
+            (Fractional::Rational(lhs), Fractional::Absolute(rhs)) => todo!(),
+            (Fractional::Rational(lhs), Fractional::Tuplet(rhs)) => todo!(),
+            (Fractional::Rational(lhs), Fractional::Rational(rhs)) => todo!(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, derive_more::Add, derive_more::Mul, derive_more::Div)]
+#[mul(forward)]
+#[div(forward)]
 pub struct Rational {
     pub num: Absolute,
     pub den: Absolute,
 }
 
-#[derive(Debug, Clone)]
+// impl Mul for Rational {
+//     type Output = Self;
+//     fn mul(self, rhs: Self) -> Self::Output {
+//         Self { num: self.num * rhs.num, den: self.den * rhs.den }
+//     }
+// }
+
+#[derive(Debug, Clone, derive_more::Div)]
+#[div(forward)]
 pub struct Tuplet {
     pub lhs: Absolute,
     pub rhs: Absolute,
+}
+
+impl Mul for Tuplet {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self {
+            lhs: self.lhs * rhs.lhs,
+            rhs: self.rhs * rhs.rhs,
+        }
+    }
+}
+
+impl Add for Tuplet {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            lhs: self.lhs * rhs.rhs + rhs.lhs * self.rhs,
+            rhs: self.rhs * rhs.rhs,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -388,20 +708,72 @@ pub struct Minutes(pub Pure);
 #[derive(Debug, Clone)]
 pub struct Seconds(pub Pure);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Div)]
+#[div(forward)]
 pub enum Pure {
     Relative(Relative),
     Absolute(Absolute),
-    Rational(Rational)
+    Rational(Rational),
 }
 
-#[derive(Debug, Clone)]
+impl Add for Pure {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Pure::Relative(lhs), Pure::Relative(rhs)) => todo!(),
+            (Pure::Relative(relative), Pure::Absolute(absolute)) => todo!(),
+            (Pure::Relative(relative), Pure::Rational(rational)) => todo!(),
+            (Pure::Absolute(absolute), Pure::Relative(relative)) => todo!(),
+            (Pure::Absolute(lhs), Pure::Absolute(rhs)) => {
+                Pure::Absolute(Absolute::Float(lhs.as_f64() + rhs.as_f64()))
+            }
+            (Pure::Absolute(absolute), Pure::Rational(rational)) => todo!(),
+            (Pure::Rational(rational), Pure::Relative(relative)) => todo!(),
+            (Pure::Rational(rational), Pure::Absolute(absolute)) => todo!(),
+            (Pure::Rational(lhs), Pure::Rational(rhs)) => todo!(),
+        }
+    }
+}
+
+impl Mul for Pure {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Pure::Relative(lhs), Pure::Relative(rhs)) => Pure::Relative(lhs * rhs),
+            (Pure::Relative(relative), Pure::Absolute(absolute)) => todo!(),
+            (Pure::Relative(relative), Pure::Rational(rational)) => todo!(),
+            (Pure::Absolute(absolute), Pure::Relative(relative)) => todo!(),
+            (Pure::Absolute(lhs), Pure::Absolute(rhs)) => Pure::Absolute(lhs * rhs),
+            (Pure::Absolute(absolute), Pure::Rational(rational)) => todo!(),
+            (Pure::Rational(rational), Pure::Relative(relative)) => todo!(),
+            (Pure::Rational(rational), Pure::Absolute(absolute)) => todo!(),
+            (Pure::Rational(lhs), Pure::Rational(rhs)) => Pure::Rational(lhs * rhs),
+        }
+    }
+}
+
+#[derive(Debug, Clone, derive_more::Mul, derive_more::Div)]
+#[mul(forward)]
+#[div(forward)]
 pub struct Relative {
     pub sign: Sign,
     pub val: Absolute,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl Add for Relative {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            sign: self.sign + rhs.sign,
+            val: self.val + rhs.val,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, derive_more::From)]
 pub enum Absolute {
     UInt(u64),
     Float(f64),
@@ -423,6 +795,25 @@ impl Mul<u64> for Absolute {
     }
 }
 
+impl Mul for Absolute {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match self {
+            Absolute::UInt(_) => Absolute::UInt(self.as_u64() * rhs.as_u64()),
+            Absolute::Float(_) => Absolute::Float(self.as_f64() * self.as_f64()),
+        }
+    }
+}
+
+impl Div for Absolute {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        Absolute::Float(self.as_f64() / rhs.as_f64())
+    }
+}
+
 impl Mul<Length> for Absolute {
     type Output = Absolute;
     fn mul(self, rhs: Length) -> Self::Output {
@@ -437,6 +828,14 @@ impl Div<Absolute> for f64 {
     type Output = f64;
     fn div(self, rhs: Absolute) -> Self::Output {
         self / rhs.as_f64()
+    }
+}
+
+impl Add for Absolute {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::Float(self.as_f64() + rhs.as_f64())
     }
 }
 
@@ -463,21 +862,50 @@ impl Absolute {
     }
 }
 
-impl Div for Absolute {
-    type Output = Absolute;
-    fn div(self, rhs: Self) -> Self::Output {
-        // Absolute::Float(f64::round(self.as_f64() / rhs.as_f64()))
-        Absolute::UInt((self.as_u64() * 100) / (rhs.as_u64() * 100))
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum Sign {
     Plus,
     Minus,
 }
 
+impl Add for Sign {
+    type Output = Sign;
 
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Sign::Plus, Sign::Plus) => Sign::Plus,
+            (Sign::Plus, Sign::Minus) => Sign::Minus,
+            (Sign::Minus, Sign::Plus) => Sign::Minus,
+            (Sign::Minus, Sign::Minus) => Sign::Plus,
+        }
+    }
+}
+
+impl Mul for Sign {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Sign::Plus, Sign::Plus) => Self::Plus,
+            (Sign::Plus, Sign::Minus) => Self::Minus,
+            (Sign::Minus, Sign::Plus) => Self::Minus,
+            (Sign::Minus, Sign::Minus) => Self::Plus,
+        }
+    }
+}
+
+impl Div for Sign {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Sign::Plus, Sign::Plus) => Self::Plus,
+            (Sign::Plus, Sign::Minus) => Self::Minus,
+            (Sign::Minus, Sign::Plus) => Self::Minus,
+            (Sign::Minus, Sign::Minus) => Self::Plus,
+        }
+    }
+}
 
 pub mod utils {
     use crate::compiler::{

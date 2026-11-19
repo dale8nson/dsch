@@ -4,7 +4,7 @@ pub mod state;
 pub mod utils;
 
 use std::{
-    any::{Any, TypeId}, cell::{LazyCell, OnceCell, RefCell}, collections::{BTreeSet, HashSet}, fmt::{Debug, Display}, fs::OpenOptions, hash::{BuildHasher, DefaultHasher}, i8, iter::Sum, marker::PhantomData, ops::{Add, AddAssign, Deref, Div, Mul, Rem, Shl, Sub, SubAssign}, rc::Rc, u8, u64, usize
+    any::{Any, TypeId}, borrow::Borrow, cell::{Cell, LazyCell, OnceCell, RefCell}, collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fmt::{Debug, Display}, fs::OpenOptions, hash::{BuildHasher, DefaultHasher}, iter::Sum, marker::PhantomData, ops::{Add, AddAssign, Deref, Div, Mul, Neg, Rem, Shl, Sub, SubAssign}, rc::Rc, vec,
 };
 
 use derive_more::{From, Into};
@@ -21,8 +21,8 @@ use midly::SmpteTime;
 pub use midly::{MidiMessage, num::*};
 
 use num_bigint::BigInt;
-use num_rational::{Ratio, Rational64};
-use num_traits::{ToPrimitive, cast::FromPrimitive};
+use num_rational::{BigRational, Ratio, Rational64};
+use num_traits::{ConstZero, ToPrimitive, cast::FromPrimitive};
 
 pub const PPQ: u15 = u15::new(25200);
 
@@ -33,8 +33,12 @@ pub const PROGRAM_ID: TypeId = TypeId::of::<Prog>();
 pub const REGISTER_ID: TypeId = TypeId::of::<Register>();
 pub const TEMPO_ID: TypeId = TypeId::of::<Mpb>();
 
+pub const PEDAL: u8 = 0x40;
+
 pub const SB: char = '\u{1d173}';
 pub const EB: char = '\u{1d174}';
+
+pub type Controller = HashSet<(u8, u8)>;
 
 pub trait Normalize: Clone + From<f64> + From<Self::Output> {
     type Output: Add<f64>
@@ -79,8 +83,7 @@ pub trait Interpolant:
 
     fn get_vec(state: &State, ctx: Ctx) -> Option<Vec<Vec<Self>>>;
 
-    fn get_vec_mut(state: &mut State, ctx: Ctx) -> Option<&mut Vec<Vec<Self>>>;
-
+    fn get_vec_mut(state: &mut State, ctx: Ctx) -> &mut Vec<Vec<Self>>;
 
 }
 
@@ -88,10 +91,18 @@ pub trait ToString {
     fn to_string(&self) -> String;
 }
 
-#[derive(Debug, Clone, Ord, Eq, From)]
+#[derive(Debug, Clone, Eq, From)]
 pub enum Length {
-    MicroSeconds(Ratio<u64>),
+    MicroSeconds(Ratio<BigInt>),
     None,
+}
+
+impl Neg for Length {
+    type Output = Length;
+
+    fn neg(self) -> Self::Output {
+        Length::MicroSeconds(self.as_ratio().neg())
+    }
 }
 
 impl Normalize for Length {
@@ -114,7 +125,7 @@ impl Interpolant for Length {
         Some(state.lengths(ctx).unwrap_or_default())
     }
 
-    fn get_vec_mut(state: &mut State, ctx: Ctx) -> Option<&mut Vec<Vec<Self::T>>> {
+    fn get_vec_mut(state: &mut State, ctx: Ctx) -> &mut Vec<Vec<Self::T>> {
         state.lengths_mut(ctx)
     }
 }
@@ -143,14 +154,19 @@ impl From<<Length as Interpolant>::T> for usize {
 
 impl From<u64> for Length {
     fn from(value: u64) -> Self {
-        Length::MicroSeconds(Ratio::<u64>::from_u64(value).unwrap())
+        Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            value.into()
+        ))
     }
 }
 
 impl Length {
     pub fn as_u64(&self) -> u64 {
+        // c!{{
+        //     eprintln!("{self:?}");
+        // }}
         if let Length::MicroSeconds(uint) = self {
-            uint.to_u64().unwrap()
+            uint.to_integer().to_u64().unwrap_or_default()
         } else {
             0
         }
@@ -158,7 +174,7 @@ impl Length {
 
     pub fn as_u32(&self) -> u32 {
         if let Length::MicroSeconds(uint) = self {
-            uint.to_u32().unwrap()
+            uint.to_integer().to_u32().unwrap()
         } else {
             0
         }
@@ -166,7 +182,7 @@ impl Length {
 
     pub fn as_f64(&self) -> f64 {
         if let Length::MicroSeconds(n) = self {
-            n.to_f64().unwrap()
+            n.to_integer().to_f64().unwrap()
         } else {
             0.
         }
@@ -174,19 +190,21 @@ impl Length {
 
     pub fn as_usize(&self) -> usize {
         if let Length::MicroSeconds(n) = self {
-            n.to_usize().unwrap()
+            n.to_integer().to_usize().unwrap()
         } else {
             0
         }
     }
 
     pub fn default_max() -> Self {
-        Length::MicroSeconds(Ratio::<u64>::from_u64(u64::MAX).unwrap())
+        Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            u64::MAX.into(),
+        ))
     }
 
     pub fn to_note(self, tempo: &Tempo) -> String {
         // dbg!(&self, &tempo);
-        let note_value = 4. / (self.as_f64() / tempo.0.to_f64().unwrap());
+        let note_value = 4. / (self.as_f64() / tempo.0.to_integer().to_f64().unwrap());
         // dbg!(note_value);
         // eprintln!("{note_value}");
         let s = match note_value {
@@ -235,16 +253,14 @@ impl Length {
             _ => "\u{1d158}\u{0020}\u{0020}",
         };
         format!(
-            "{}{}{}{}",
-            TextStyle::ResetColor,
-            TextStyle::IntenseBoldGreen,
+            "{}",
             s,
-            TextStyle::ResetColor
+
         )
     }
 
     pub fn to_rest(self, tempo: &Tempo) -> String {
-        let note_value = 4. / (self.as_f64() / tempo.0.to_f64().unwrap());
+        let note_value = 4. / (self.as_f64() / tempo.0.to_integer().to_f64().unwrap());
         // dbg!(note_value);
         // eprintln!("{note_value}");
         let s = match note_value {
@@ -278,18 +294,15 @@ impl Length {
             _ => "\u{1d129}\u{0020}\u{0020}",
         };
         format!(
-            "{}{}{}{}",
-            TextStyle::ResetColor,
-            TextStyle::IntenseBoldRed,
+            "{}",
             s,
-            TextStyle::ResetColor
         )
     }
 
-    pub fn as_ratio(&self) -> Ratio<u64> {
+    pub fn as_ratio(&self) -> Ratio<BigInt> {
         match self {
-            Length::MicroSeconds(ratio) => *ratio,
-            Length::None => Ratio::<u64>::default(),
+            Length::MicroSeconds(ratio) => ratio.clone(),
+            Length::None => Ratio::<BigInt>::default(),
         }
     }
 }
@@ -306,33 +319,50 @@ impl Length {
 
 impl Default for Length {
     fn default() -> Self {
-        Length::MicroSeconds(Ratio::<u64>::from_u64(0).unwrap())
+        Length::MicroSeconds(BigRational::ZERO)
     }
 }
 
 impl From<Absolute> for Length {
     fn from(value: Absolute) -> Self {
-        Length::MicroSeconds(Ratio::<u64>::from_u64(value.as_u64()).unwrap())
+        Length::MicroSeconds(BigRational::from_float(
+            value.as_f64(),
+        ).unwrap_or_default())
     }
 }
 
 impl From<Fixed> for Length {
     fn from(value: Fixed) -> Self {
         let Fixed { minutes, seconds } = value;
-        Length::MicroSeconds(Ratio::<u64>::from_u64(minutes * 60_000_000).unwrap())
-            + Length::MicroSeconds(Ratio::<u64>::from_u64(seconds * 1_000_000).unwrap())
+        Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            (minutes * 60_000_000).into(),
+        )) + Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            (seconds * 1_000_000).into(),
+        ))
     }
 }
 
 impl From<usize> for Length {
     fn from(value: usize) -> Self {
-        Length::MicroSeconds(Ratio::<u64>::from_u64(value as u64).unwrap())
+        Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            (value as u64).into()
+        ))
     }
 }
 
 impl From<f64> for Length {
     fn from(value: f64) -> Self {
-        Length::MicroSeconds(Ratio::<u64>::from_f64(f64::round(value)).unwrap())
+        Length::MicroSeconds(Ratio::<BigInt>::from_float(
+            value
+        ).unwrap_or_default())
+    }
+}
+
+impl From<u16> for Length {
+    fn from(value: u16) -> Self {
+        Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            BigInt::from_u16(value).unwrap_or_default()
+        ))
     }
 }
 
@@ -346,48 +376,71 @@ impl Mul<Length> for f64 {
 impl Div<usize> for Length {
     type Output = Length;
     fn div(self, rhs: usize) -> Self::Output {
-        self / Length::MicroSeconds(Ratio::<u64>::from_usize(rhs).unwrap())
+        self / Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            BigInt::from_usize(rhs).unwrap_or_default(),
+        ))
     }
 }
 
 impl PartialEq for Length {
     fn eq(&self, other: &Self) -> bool {
-        Ratio::<u64>::from_f64(self.as_f64()).unwrap_or_default()
-            == Ratio::<u64>::from_f64(other.as_f64()).unwrap_or_default()
+        self.as_ratio() == other.as_ratio()
+    }
+}
+
+impl Ord for Length {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_ratio().cmp(&other.as_ratio())
     }
 }
 
 impl PartialOrd for Length {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.as_ratio().cmp(&other.as_ratio()))
+        Some(self.cmp(other))
     }
 }
 
 impl Add for Length {
     type Output = Length;
     fn add(self, rhs: Self) -> Self::Output {
-        Length::MicroSeconds(self.as_ratio() + rhs.as_ratio())
+        let lhs_ratio = self.as_ratio();
+        let rhs_ratio = rhs.as_ratio();
+
+        let ratio = lhs_ratio.clone() + rhs_ratio.clone();
+
+        Self::MicroSeconds(ratio)
     }
 }
 
 impl Sum for Length {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Length::default(), |sum, l| sum + l)
+        iter.reduce(|sum, l| {
+            let sum_ = sum + l;
+            // c! {{
+            //     eprintln!("{}", sum_.clone().as_u64());
+            // }}
+            sum_
+        }).unwrap_or_default()
     }
 }
 
 impl Mul for Length {
     type Output = Length;
     fn mul(self, rhs: Self) -> Self::Output {
-        Length::MicroSeconds(Ratio::<u64>::from_f64(self.as_f64() * rhs.as_f64()).unwrap())
+        let lhs_ratio = self.as_ratio();
+        let rhs_ratio = rhs.as_ratio();
+
+        Self::MicroSeconds(lhs_ratio * rhs_ratio)
     }
 }
 
 impl Div for Length {
     type Output = Length;
     fn div(self, rhs: Self) -> Self::Output {
-        Length::MicroSeconds(Ratio::<u64>::from_f64(self.as_f64() / rhs.as_f64()).unwrap())
-        // Length::MicroSeconds(self.as_u64() / rhs.as_u64())
+        let lhs_ratio = self.as_ratio();
+        let rhs_ratio = rhs.as_ratio();
+
+        Self::MicroSeconds(lhs_ratio / rhs_ratio)
     }
 }
 
@@ -395,19 +448,32 @@ impl Rem for Length {
     type Output = Length;
     fn rem(self, rhs: Self) -> Self::Output {
         // dbg!(&self, &rhs);
-        Length::MicroSeconds(Ratio::<u64>::from_u64(self.as_u64() % rhs.as_u64()).unwrap())
+        Length::MicroSeconds(Ratio::<BigInt>::from_integer(
+            BigInt::from_u64(self.as_u64() % rhs.as_u64()).unwrap_or_default(),
+        ))
     }
 }
 
 impl Sub for Length {
     type Output = Length;
     fn sub(self, rhs: Self) -> Self::Output {
-        Length::MicroSeconds(Ratio::<u64>::from_f64(self.as_f64() - rhs.as_f64()).unwrap())
+        let lhs_ratio = self.as_ratio();
+        let rhs_ratio = rhs.as_ratio();
+
+        let ratio = lhs_ratio - rhs_ratio;
+
+        Self::MicroSeconds(ratio)
     }
 }
 
 impl AddAssign for Length {
     fn add_assign(&mut self, rhs: Self) {
+        // dbg!(
+        //     self.as_ratio().numer(),
+        //     self.as_ratio().denom(),
+        //     rhs.as_ratio().numer(),
+        //     rhs.as_ratio().denom()
+        // );
         *self = self.clone() + rhs
     }
 }
@@ -441,7 +507,7 @@ impl Interpolant for Velocity {
         Some(state.velocities(ctx).unwrap_or_default())
     }
 
-    fn get_vec_mut(state: &mut State, ctx: Ctx) -> Option<&mut Vec<Vec<Self::T>>> {
+    fn get_vec_mut(state: &mut State, ctx: Ctx) -> &mut Vec<Vec<Self::T>> {
         state.velocities_mut(ctx)
     }
 }
@@ -494,19 +560,7 @@ impl From<usize> for Velocity {
 
 impl From<Dynamic> for Velocity {
     fn from(value: Dynamic) -> Self {
-        let Dynamic(string) = value;
-        let vel = match string.as_str() {
-            "ppp" => 20,
-            "pp" => 39,
-            "mp" => 71,
-            "p" => 57,
-            "mf" => 84,
-            "f" => 98,
-            "ff" => 113,
-            "fff" => 127,
-            _ => 80,
-        };
-        Velocity(vel)
+        Velocity(value.as_f64() as u8)
     }
 }
 
@@ -550,7 +604,7 @@ impl Div<usize> for Velocity {
     type Output = Velocity;
 
     fn div(self, rhs: usize) -> Self::Output {
-        Velocity(f64::round(self.0 as f64 / (rhs.max(1).min(u8::MAX as usize) as f64)) as u8)
+        Velocity(f64::round(self.0 as f64 / (rhs.max(1).min(usize::MAX as usize) as f64)) as u8)
     }
 }
 
@@ -680,7 +734,7 @@ impl Interpolant for Pc {
         state.pcs(ctx)
     }
 
-    fn get_vec_mut(state: &mut State, ctx: Ctx) -> Option<&mut Vec<Vec<Self::T>>> {
+    fn get_vec_mut(state: &mut State, ctx: Ctx) -> &mut Vec<Vec<Self::T>> {
         state.pcs_mut(ctx)
     }
 }
@@ -818,6 +872,10 @@ impl From<Absolute> for Pc {
     }
 }
 
+const NOTE_NAMES: [&str; 12] = [
+    "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B",
+];
+
 impl Pc {
     pub fn as_f64(&self) -> f64 {
         match *self {
@@ -825,11 +883,22 @@ impl Pc {
             Pc::None => 0.0,
         }
     }
+
+    pub fn to_note_name(&self, reg: Register) -> String {
+        match self {
+            Pc::Class(pc) => format!(
+                "{}{}",
+                NOTE_NAMES[*pc as usize % 12].to_string(),
+                reg.as_i8()
+            ),
+            Pc::None => "~".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialOrd, Ord, From)]
 /// Microseconds per beat
-pub struct Mpb(pub Ratio<u64>);
+pub struct Mpb(pub Ratio<BigInt>);
 
 pub type Tempo = Mpb;
 
@@ -842,7 +911,9 @@ impl ToString for Mpb {
 impl Normalize for Mpb {
     type Output = f64;
     fn norm(&self) -> Self::Output {
-        (self.0.clone() * Ratio::<u64>::from_f64(1.0).unwrap())
+        (self.clone() * Self(Ratio::<BigInt>::from_integer(BigInt::from_u64(1).unwrap())))
+            .0
+            .to_integer()
             .to_f64()
             .unwrap()
     }
@@ -855,14 +926,16 @@ impl Interpolant for Mpb {
         state.tempos(ctx)
     }
 
-    fn get_vec_mut(state: &mut State, ctx: Ctx) -> Option<&mut Vec<Vec<Self::T>>> {
+    fn get_vec_mut(state: &mut State, ctx: Ctx) -> &mut Vec<Vec<Self::T>> {
         state.tempos_mut(ctx)
     }
 }
 
 impl Default for Mpb {
     fn default() -> Self {
-        Mpb(Ratio::<u64>::from_f64(60_000_000 as f64 / 120 as f64).unwrap())
+        Mpb(Ratio::<BigInt>::from_integer(
+            BigInt::from_f64(60_000_000 as f64 / 120 as f64).unwrap(),
+        ))
     }
 }
 
@@ -870,7 +943,22 @@ impl Add for Mpb {
     type Output = Mpb;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Mpb(self.0 + rhs.0)
+        let lhs_ratio = self.0;
+        let lhs_num = lhs_ratio.numer().clone();
+        let lhs_den = lhs_ratio.denom().clone();
+        let rhs_ratio = rhs.0;
+        let rhs_num = rhs_ratio.numer().clone();
+        let rhs_den = rhs_ratio.denom().clone();
+
+        // dbg!(&lhs_num, &lhs_den, &rhs_num, &rhs_den);
+
+        let numer = lhs_num * rhs_den.clone() + rhs_num * lhs_den.clone();
+        let denom = lhs_den * rhs_den;
+
+        // dbg!(numer.to_u64(), denom.to_u64());
+        let ratio = Ratio::new(numer, denom);
+
+        Self(ratio)
     }
 }
 
@@ -884,7 +972,19 @@ impl Sub for Mpb {
     type Output = Mpb;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        Mpb(self.0 - rhs.0)
+        let lhs_ratio = self.0;
+        let lhs_num = lhs_ratio.numer().clone();
+        let lhs_den = lhs_ratio.denom().clone();
+        let rhs_ratio = rhs.0;
+        let rhs_num = rhs_ratio.numer().clone();
+        let rhs_den = rhs_ratio.denom().clone();
+
+        let ratio = Ratio::<BigInt>::new(
+            lhs_num * rhs_den.clone() - rhs_num * lhs_den.clone(),
+            lhs_den * rhs_den,
+        );
+
+        Self(ratio)
     }
 }
 
@@ -898,7 +998,20 @@ impl Mul<Mpb> for Mpb {
     type Output = Mpb;
 
     fn mul(self, rhs: Mpb) -> Self::Output {
-        Mpb(self.0 * rhs.0)
+        let lhs_ratio = self.0;
+        let lhs_num = lhs_ratio.numer().clone();
+        let lhs_den = lhs_ratio.denom().clone();
+        let rhs_ratio = rhs.0;
+        let rhs_num = rhs_ratio.numer().clone();
+        let rhs_den = rhs_ratio.denom().clone();
+
+        // dbg!(&lhs_num, &lhs_den, &rhs_num, &rhs_den);
+
+        let numer = lhs_num * rhs_num;
+        let denom = lhs_den * rhs_den;
+        let ratio = Ratio::new(numer, denom);
+
+        Self(ratio)
     }
 }
 
@@ -906,44 +1019,52 @@ impl Div for Mpb {
     type Output = Mpb;
 
     fn div(self, rhs: Self) -> Self::Output {
-        Mpb(self.0 / rhs.0)
+        let lhs_ratio = self.0;
+        let rhs_ratio = rhs.0;
+
+        Self(lhs_ratio * rhs_ratio.recip())
     }
 }
 
 impl From<Absolute> for Mpb {
     fn from(value: Absolute) -> Self {
-        let microseconds_per_quarter_note = Ratio::<u64>::from_f64(60_000_000. / value).unwrap();
+        let microseconds_per_quarter_note =
+            Ratio::<BigInt>::from_float(60_000_000. / value.as_f64()).unwrap_or_default();
         Mpb(microseconds_per_quarter_note)
     }
 }
 
 impl From<usize> for Mpb {
     fn from(value: usize) -> Self {
-        Mpb(Ratio::<u64>::from_usize(value).unwrap())
+        Mpb(Ratio::<BigInt>::from_integer(
+            BigInt::from_usize(value).unwrap_or_default(),
+        ))
     }
 }
 
 impl From<Mpb> for usize {
     fn from(value: Mpb) -> Self {
-        value.0.to_usize().unwrap()
+        value.0.to_integer().to_usize().unwrap()
     }
 }
 
 impl From<Length> for Mpb {
     fn from(value: Length) -> Self {
-        Mpb(Ratio::<u64>::from_f64(value.as_f64()).unwrap())
+        Self(Ratio::<BigInt>::from((value.as_ratio())))
     }
 }
 
 impl From<Mpb> for f64 {
     fn from(value: Mpb) -> Self {
-        value.0.to_f64().unwrap()
+        value.0.to_integer().to_f64().unwrap()
     }
 }
 
 impl From<f64> for Mpb {
     fn from(value: f64) -> Self {
-        Mpb(Ratio::<u64>::from_f64(value).unwrap())
+        Self(Ratio::<BigInt>::from_float(
+            value).unwrap_or_default(),
+        )
     }
 }
 
@@ -966,7 +1087,7 @@ impl From<Data> for <Mpb as Interpolant>::T {
 impl Mul<Mpb> for f64 {
     type Output = f64;
     fn mul(self, rhs: Mpb) -> Self::Output {
-        self * rhs.0.to_f64().unwrap()
+        self * rhs.0.to_integer().to_f64().unwrap()
     }
 }
 
@@ -978,7 +1099,19 @@ impl BuildHasher for Mpb {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, From)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    From,
+    derive_more::Add,
+    derive_more::Mul,
+)]
 pub struct Prog(pub u8);
 
 impl Normalize for Prog {
@@ -1002,7 +1135,7 @@ impl Interpolant for Prog {
         Some(state.programs(ctx).unwrap_or_default())
     }
 
-    fn get_vec_mut(state: &mut State, ctx: Ctx) -> Option<&mut Vec<Vec<Self::T>>> {
+    fn get_vec_mut(state: &mut State, ctx: Ctx) -> &mut Vec<Vec<Self::T>> {
         state.programs_mut(ctx)
     }
 }
@@ -1053,13 +1186,13 @@ impl From<Prog> for usize {
     }
 }
 
-impl Add for Prog {
-    type Output = Prog;
+// impl Add for Prog {
+//     type Output = Prog;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        Prog(self.0 + rhs.0)
-    }
-}
+//     fn add(self, rhs: Self) -> Self::Output {
+//         Prog(self.0 + rhs.0)
+//     }
+// }
 
 impl AddAssign for Prog {
     fn add_assign(&mut self, rhs: Self) {
@@ -1132,7 +1265,7 @@ impl Interpolant for Register {
         Some(state.registers(ctx).unwrap_or_default())
     }
 
-    fn get_vec_mut(state: &mut State, ctx: Ctx) -> Option<&mut Vec<Vec<Self::T>>> {
+    fn get_vec_mut(state: &mut State, ctx: Ctx) -> &mut Vec<Vec<Self::T>> {
         state.registers_mut(ctx)
     }
 }
@@ -1332,18 +1465,14 @@ pub enum Instruction {
 //     pub Vec<Vec<Data>>,
 // );
 
-
 #[derive(Clone)]
-pub struct Thunk(
-    pub Rc<RefCell<Box<dyn FnMut(Ctx, &mut State)>>>
-);
+pub struct Thunk(pub Rc<RefCell<Box<dyn FnMut(Ctx, &mut State)>>>);
 
 // impl<'a, 'b> Clone for Thunk<'a, 'b> {
 //     fn clone(&self) -> Self<'a, 'b> {
 //         self.
 //     }
 // }
-
 
 // impl Default for Thunk {
 //     fn default() -> Self {
@@ -1359,7 +1488,7 @@ impl Debug for Thunk {
             format!(
                 "{}Thunk({:?}){}",
                 color!(),
-                (self.0).as_ptr(),
+                self.0.as_ptr(),
                 TextStyle::ResetColor
             )
             .as_str(),
@@ -1370,14 +1499,12 @@ impl Debug for Thunk {
 
 impl Thunk {
     pub fn new(thunk: Box<dyn FnMut(Ctx, &mut State)>) -> Self {
-
         Self(Rc::new(RefCell::new(thunk)))
     }
 
-    pub fn call(&mut self, ctx: Ctx, state: &mut State)
-
-    {
-        self.0.borrow_mut()(ctx, state);
+    pub fn call(self, ctx: Ctx, state: &mut State) {
+        let mut f = self.0.borrow_mut();
+        f(ctx, state);
     }
 }
 
@@ -1398,10 +1525,14 @@ impl Thunk {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum LifeCycleEvent {
-    Sequencing,
-    Composing,
+    PreComposition,
+    Composition,
+    PostComposition,
+    PreSequence,
+    Sequence,
+    PostSequence,
     #[default]
-    None
+    None,
 }
 
 #[derive(Debug, Clone, Default, From)]
@@ -1414,9 +1545,35 @@ pub enum Data {
     /// TODO: Move to separate enum
     Interpolation(Interpolation),
     Program(Prog),
+    Controller(Controller),
     #[default]
     None,
 }
+
+impl From<Data> for Controller {
+    fn from(value: Data) -> Self {
+        match value {
+            Data::Controller(set) => set,
+            _ => HashSet::new(),
+        }
+    }
+}
+
+impl From<(u8, u8)> for Data {
+    fn from(value: (u8, u8)) -> Self {
+        Data::Controller(HashSet::from_iter(vec![value]))
+    }
+}
+
+impl ToString for Controller {
+    fn to_string(&self) -> String {
+        format!("Controller")
+    }
+}
+
+pub trait Get {}
+
+impl<T, U> Get for HashMap<T, U> {}
 
 // impl From<<Velocity as Interpolate>::T> for Data {
 //     fn from(value: Velocity) -> Self {
@@ -1511,16 +1668,18 @@ pub enum HomogenousLayer {
     Register,
     Velocity,
     Tempo,
+    Controller,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Slice {
-    pcs: Vec<Pc>,
-    registers: Vec<Register>,
-    lengths: Vec<Length>,
-    velocities: Vec<Velocity>,
-    tempos: Vec<Tempo>,
-    programs: Vec<Prog>,
+    pub pcs: Vec<Pc>,
+    pub registers: Vec<Register>,
+    pub lengths: Vec<Length>,
+    pub velocities: Vec<Velocity>,
+    pub tempos: Vec<Tempo>,
+    pub programs: Vec<Prog>,
+    pub controllers: Vec<Controller>,
 }
 
 impl Slice {
@@ -1531,6 +1690,7 @@ impl Slice {
         velocities: Vec<Velocity>,
         tempos: Vec<Tempo>,
         programs: Vec<Prog>,
+        controllers: Vec<Controller>,
     ) -> Self {
         Self {
             pcs,
@@ -1539,30 +1699,21 @@ impl Slice {
             velocities,
             tempos,
             programs,
+            controllers,
         }
     }
 
     pub fn data(
         &self,
-    ) ->
-    (
+    ) -> (
         &[Pc],
         &[Register],
         &[Length],
         &[Velocity],
         &[Tempo],
-        &[Prog]
-    )
-
-    // (
-    //     Vec<Pc>,
-    //     Vec<Register>,
-    //     Vec<Length>,
-    //     Vec<Velocity>,
-    //     Vec<Tempo>,
-    //     Vec<Prog>,
-    // )
-    {
+        &[Prog],
+        &[Controller],
+    ) {
         (
             self.pcs.as_slice(),
             self.registers.as_slice(),
@@ -1570,6 +1721,7 @@ impl Slice {
             self.velocities.as_slice(),
             self.tempos.as_slice(),
             self.programs.as_slice(),
+            self.controllers.as_slice(),
         )
     }
 }
